@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 libcint = "0.2"
-rstsr = "0.6"
+# rstsr = "0.6"
 
 [profile.dev]
 opt-level = 3
