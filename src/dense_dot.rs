@@ -84,6 +84,7 @@ where
         nr: usize,
         kc: usize,
         ldc: usize,
+        c_barrier: &[Mutex<()>],
     ) {
         // MR -> MC
         unsafe {
@@ -91,6 +92,9 @@ where
             core::hint::assert_unchecked(nr <= NR_LANE * LANE);
             core::hint::assert_unchecked(kc <= KC);
         }
+
+        let NR = NR_LANE * LANE;
+        let ntask_nr = NC.div_ceil(NR);
 
         for (i_pack, i) in (0..mc).step_by(MR).enumerate() {
             // initialize C register block
@@ -101,13 +105,13 @@ where
             unsafe { Self::microkernel(&mut c_reg, &a[i_pack], b, mr, kc) }
 
             // store C register block to C memory block
+            let c_lock = c_barrier[i_pack * ntask_nr].lock().unwrap();
             for ii in 0..mr {
                 for j in 0..nr {
-                    let j_loc = j / LANE;
-                    let j_lane = j % LANE;
-                    c[(i + ii) * ldc + j] += c_reg[ii][j_loc][j_lane];
+                    c[(i + ii) * ldc + j] += unsafe { *(c_reg[ii].as_ptr() as *const T).add(j) };
                 }
             }
+            drop(c_lock);
         }
     }
 
@@ -121,6 +125,7 @@ where
         kc: usize,
         ldb: usize,
         ldc: usize,
+        c_barrier: &[Mutex<()>],
     ) {
         // NR -> NC
         unsafe {
@@ -132,7 +137,7 @@ where
         let NR = NR_LANE * LANE;
         let mut buf_b: [[FpSimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() }; // KC x NR, packed, aligned, cache l1
 
-        for j in (0..nc).step_by(NR) {
+        for (idx_j, j) in (0..nc).step_by(NR).enumerate() {
             let nr = if j + NR <= nc { NR } else { nc - j };
 
             // pack B block
@@ -144,7 +149,7 @@ where
                 }
             }
 
-            Self::matmul_loop_1st(&mut c[j..], a, &buf_b, mc, nr, kc, ldc);
+            Self::matmul_loop_1st(&mut c[j..], a, &buf_b, mc, nr, kc, ldc, &c_barrier[idx_j..]);
         }
     }
 
@@ -157,15 +162,20 @@ where
         let ntask_nc = n.div_ceil(NC);
         let ntask_kc = k.div_ceil(KC);
         let ntask = ntask_mc * ntask_nc * ntask_kc;
-        let barrier_c: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc)).map(|_| Mutex::new(())).collect();
+        // let barrier_c: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc)).map(|_|
+        // Mutex::new(())).collect();
 
         // let nthreads = rayon::current_num_threads();
-        // let NR: usize = NR_LANE * LANE;
+        let NR: usize = NR_LANE * LANE;
         let ntask_mr = MC.div_ceil(MR);
-        // let ntask_nr = NC.div_ceil(NR);
+        let ntask_nr = NC.div_ceil(NR);
+
+        // barrier_c: [ntask_mc][ntask_nc][ntask_mr][ntask_nr]
+        let c_barrier: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc * ntask_mr * ntask_nr)).map(|_| Mutex::new(())).collect();
 
         // pack matrix a: [ntask_mc][ntask_kc][ntask_mr][KC][MR]
         let a_pack: Vec<[[T; MR]; KC]> = unsafe { uninitialized_vec(ntask_mc * ntask_kc * ntask_mr) };
+
         (0..ntask_mc * ntask_kc).into_par_iter().for_each(|task_id| {
             let task_mc = task_id / ntask_kc;
             let task_kc = task_id % ntask_kc;
@@ -191,10 +201,6 @@ where
             let task_n = (task_id / ntask_kc) % ntask_nc;
             let task_k = task_id % ntask_kc;
 
-            // access buffers
-            let mut buf_c: [[T; NC]; MC] = unsafe { zeroed() };
-            let slc_c: &mut [T] = buf_c.as_flattened_mut();
-
             // get slices
             let b = &b[task_k * KC * ldb + task_n * NC..];
             let mc = if (task_m + 1) * MC <= m { MC } else { m - task_m * MC };
@@ -202,24 +208,15 @@ where
             let kc = if (task_k + 1) * KC <= k { KC } else { k - task_k * KC };
 
             let a_pack_mc_kc = &a_pack[task_m * (ntask_kc * ntask_mr) + task_k * ntask_mr..];
+            let c_barrier_mc_nc = &c_barrier[(task_m * ntask_nc + task_n) * (ntask_mr * ntask_nr)..];
+            let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
             unsafe {
                 core::hint::assert_unchecked(mc <= MC);
                 core::hint::assert_unchecked(nc <= NC);
                 core::hint::assert_unchecked(kc <= KC);
             }
-            Self::matmul_loop_2nd(slc_c, a_pack_mc_kc, b, mc, nc, kc, ldb, NC);
-
-            // write back to C
-            // use barrier to avoid race condition
-            let write_lock = barrier_c[task_m * ntask_nc + task_n].lock().unwrap();
-            let c = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
-            for i in 0..mc {
-                for j in 0..nc {
-                    c[i * ldc + j] += buf_c[i][j];
-                }
-            }
-            drop(write_lock)
+            Self::matmul_loop_2nd(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, c_barrier_mc_nc);
         });
     }
 }
@@ -255,18 +252,18 @@ fn test_matmul_anyway_full() {
     let elapsed = time.elapsed();
     println!("Elapsed time: {:.3?}", elapsed);
 
-    use rstsr::prelude::*;
-    let device = DeviceOpenBLAS::default();
-    let a_tsr = rt::asarray((&a, [m, k], &device));
-    let b_tsr = rt::asarray((&b, [k, n], &device));
-    let time = std::time::Instant::now();
-    let c_ref = a_tsr % b_tsr;
-    let elapsed = time.elapsed();
-    println!("Elapsed time (ref): {:.3?}", elapsed);
+    // use rstsr::prelude::*;
+    // let device = DeviceOpenBLAS::default();
+    // let a_tsr = rt::asarray((&a, [m, k], &device));
+    // let b_tsr = rt::asarray((&b, [k, n], &device));
+    // let time = std::time::Instant::now();
+    // let c_ref = a_tsr % b_tsr;
+    // let elapsed = time.elapsed();
+    // println!("Elapsed time (ref): {:.3?}", elapsed);
 
-    let c_tsr = rt::asarray((&c, [m, n], &device));
-    let diff = &c_tsr - &c_ref;
-    println!("Max error: {:.6e}", diff.view().abs().max());
+    // let c_tsr = rt::asarray((&c, [m, n], &device));
+    // let diff = &c_tsr - &c_ref;
+    // println!("Max error: {:.6e}", diff.view().abs().max());
 
     // println!("c_tsr\n{c_tsr:15.3}");
     // println!("c_ref\n{c_ref:15.3}");
