@@ -106,9 +106,13 @@ where
 
             // store C register block to C memory block
             let c_lock = c_barrier[i_pack * ntask_nr].lock().unwrap();
-            for ii in 0..mr {
-                for j in 0..nr {
-                    c[(i + ii) * ldc + j] += unsafe { *(c_reg[ii].as_ptr() as *const T).add(j) };
+            unsafe {
+                for ii in 0..mr {
+                    let c_assign = &mut c.get_unchecked_mut((i + ii) * ldc..(i + ii) * ldc + nr);
+                    let c_regslc = core::slice::from_raw_parts(c_reg[ii].as_ptr() as *const T, nr);
+                    for j in 0..nr {
+                        *c_assign.get_unchecked_mut(j) += *c_regslc.get_unchecked(j);
+                    }
                 }
             }
             drop(c_lock);
@@ -158,15 +162,10 @@ where
         T: Send + Sync,
     {
         // compute number of tasks to split
+        let NR: usize = NR_LANE * LANE;
         let ntask_mc = m.div_ceil(MC);
         let ntask_nc = n.div_ceil(NC);
         let ntask_kc = k.div_ceil(KC);
-        let ntask = ntask_mc * ntask_nc * ntask_kc;
-        // let barrier_c: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc)).map(|_|
-        // Mutex::new(())).collect();
-
-        // let nthreads = rayon::current_num_threads();
-        let NR: usize = NR_LANE * LANE;
         let ntask_mr = MC.div_ceil(MR);
         let ntask_nr = NC.div_ceil(NR);
 
@@ -196,7 +195,7 @@ where
             }
         });
 
-        (0..ntask).into_par_iter().for_each(|task_id| {
+        (0..ntask_mc * ntask_nc * ntask_kc).into_par_iter().for_each(|task_id| {
             let task_m = task_id / (ntask_nc * ntask_kc);
             let task_n = (task_id / ntask_kc) % ntask_nc;
             let task_k = task_id % ntask_kc;
@@ -211,11 +210,6 @@ where
             let c_barrier_mc_nc = &c_barrier[(task_m * ntask_nc + task_n) * (ntask_mr * ntask_nr)..];
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
-            unsafe {
-                core::hint::assert_unchecked(mc <= MC);
-                core::hint::assert_unchecked(nc <= NC);
-                core::hint::assert_unchecked(kc <= KC);
-            }
             Self::matmul_loop_2nd(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, c_barrier_mc_nc);
         });
     }
@@ -232,7 +226,7 @@ pub fn matmul_anyway_full(
     ldb: usize,
     ldc: usize,
 ) {
-    MatmulLoops::<f64, 234, 256, 256, 13, 2, 8>::matmul_loop_345_parallel(c, a, b, m, n, k, lda, ldb, ldc);
+    MatmulLoops::<f64, 234, 256, 240, 13, 2, 8>::matmul_loop_345_parallel(c, a, b, m, n, k, lda, ldb, ldc);
 }
 
 #[test]
@@ -252,18 +246,18 @@ fn test_matmul_anyway_full() {
     let elapsed = time.elapsed();
     println!("Elapsed time: {:.3?}", elapsed);
 
-    // use rstsr::prelude::*;
-    // let device = DeviceOpenBLAS::default();
-    // let a_tsr = rt::asarray((&a, [m, k], &device));
-    // let b_tsr = rt::asarray((&b, [k, n], &device));
-    // let time = std::time::Instant::now();
-    // let c_ref = a_tsr % b_tsr;
-    // let elapsed = time.elapsed();
-    // println!("Elapsed time (ref): {:.3?}", elapsed);
+    use rstsr::prelude::*;
+    let device = DeviceOpenBLAS::default();
+    let a_tsr = rt::asarray((&a, [m, k], &device));
+    let b_tsr = rt::asarray((&b, [k, n], &device));
+    let time = std::time::Instant::now();
+    let c_ref = a_tsr % b_tsr;
+    let elapsed = time.elapsed();
+    println!("Elapsed time (ref): {:.3?}", elapsed);
 
-    // let c_tsr = rt::asarray((&c, [m, n], &device));
-    // let diff = &c_tsr - &c_ref;
-    // println!("Max error: {:.6e}", diff.view().abs().max());
+    let c_tsr = rt::asarray((&c, [m, n], &device));
+    let diff = &c_tsr - &c_ref;
+    println!("Max error: {:.6e}", diff.view().abs().max());
 
     // println!("c_tsr\n{c_tsr:15.3}");
     // println!("c_ref\n{c_ref:15.3}");
