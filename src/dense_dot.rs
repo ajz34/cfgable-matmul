@@ -29,26 +29,26 @@ where
     );
 }
 
-impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize> MatmulMicroKernelAPI<f64, KC, MR, NR_LANE, 8>
-    for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, 8>
+impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize>
+    MatmulMicroKernelAPI<f64, KC, MR, NR_LANE, LANE> for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, LANE>
 {
     #[inline]
     unsafe fn microkernel(
-        c: &mut [[f64simd; NR_LANE]], // MR x NR, aligned, register
-        a: &[[f64; MR]],              // kc x MR (lda), packed-transposed, cache l2 prefetch l1
-        b: &[[f64simd; NR_LANE]],     // kc x NR, packed, aligned, cache l1
+        c: &mut [[FpSimd<f64, LANE>; NR_LANE]], // MR x NR, aligned, register
+        a: &[[f64; MR]],                        // kc x MR (lda), packed-transposed, cache l2 prefetch l1
+        b: &[[FpSimd<f64, LANE>; NR_LANE]],     // kc x NR, packed, aligned, cache l1
         mr: usize,
         kc: usize,
     ) {
         core::hint::assert_unchecked(kc <= KC);
         core::hint::assert_unchecked(mr <= MR);
 
-        let c: &mut [[f64simd; NR_LANE]] = transmute(c);
-        let b: &[[f64simd; NR_LANE]] = transmute(b);
+        let c: &mut [[FpSimd<f64, LANE>; NR_LANE]] = transmute(c);
+        let b: &[[FpSimd<f64, LANE>; NR_LANE]] = transmute(b);
         if mr == MR {
             for p in 0..kc {
                 for i in 0..MR {
-                    let a_ip = f64simd::splat(*a.get_unchecked(p).get_unchecked(i));
+                    let a_ip = FpSimd::splat(*a.get_unchecked(p).get_unchecked(i));
                     for j_lane in 0..NR_LANE {
                         let b_pj = *b.get_unchecked(p).get_unchecked(j_lane);
                         c.get_unchecked_mut(i).get_unchecked_mut(j_lane).fma_from(b_pj, a_ip);
@@ -58,7 +58,7 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
         } else {
             for p in 0..kc {
                 for i in 0..mr {
-                    let a_ip = f64simd::splat(*a.get_unchecked(p).get_unchecked(i));
+                    let a_ip = FpSimd::splat(*a.get_unchecked(p).get_unchecked(i));
                     for j_lane in 0..NR_LANE {
                         let b_pj = *b.get_unchecked(p).get_unchecked(j_lane);
                         c.get_unchecked_mut(i).get_unchecked_mut(j_lane).fma_from(b_pj, a_ip);

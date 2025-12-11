@@ -8,7 +8,8 @@ libcint = "0.2"
 rayon = "1.11"
 duplicate = "2.0"
 num = "0.4"
-rstsr = { version = "0.6", default-features = false, features = ["openblas"] }
+faer = "0.22"
+rstsr = { version = "0.6", features = ["openblas"] }
 rstsr-openblas = { version = "0.6", features = ["openmp"] }
 
 [profile.dev]

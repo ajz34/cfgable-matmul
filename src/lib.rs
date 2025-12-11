@@ -6,4 +6,5 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod dense_dot;
+pub mod naive_simd;
 pub mod prelude;
