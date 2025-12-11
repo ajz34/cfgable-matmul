@@ -1,5 +1,14 @@
 pub(crate) use libcint::gto::prelude_dev::*;
 
+#[allow(clippy::uninit_vec)]
+#[inline]
+pub unsafe fn uninitialized_vec<T>(size: usize) -> Vec<T> {
+    let mut v: Vec<T> = vec![];
+    v.try_reserve_exact(size).unwrap();
+    unsafe { v.set_len(size) };
+    v
+}
+
 pub trait F64SimdExtend<T> {
     #[allow(clippy::missing_safety_doc)]
     unsafe fn loadu_ptr(src: *const T) -> Self;

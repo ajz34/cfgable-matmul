@@ -27,86 +27,43 @@ where
         mr: usize,
         kc: usize,
     );
-
-    unsafe fn microkernel_mask(
-        c: &mut [[FpSimd<T, LANE>; NR_LANE]], // MR x NR, aligned, register
-        a: &[T],                              // MR x kc (lda), packed, cache l2 prefetch l1
-        b: &[[FpSimd<T, LANE>; NR_LANE]],     // kc x NR, packed, aligned, cache l1
-        mask: &[bool],                        // kc
-        kc: usize,
-        lda: usize,
-    );
 }
 
-impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize> MatmulMicroKernelAPI<f64, KC, MR, 2, 8>
-    for MatmulLoops<f64, MC, KC, NC, MR, 2, 8>
+impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize> MatmulMicroKernelAPI<f64, KC, MR, NR_LANE, 8>
+    for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, 8>
 {
     #[inline]
     unsafe fn microkernel(
-        c: &mut [[f64simd; 2]], // MR x NR, aligned, register
-        a: &[[f64; MR]],        // kc x MR (lda), packed-transposed, cache l2 prefetch l1
-        b: &[[f64simd; 2]],     // kc x NR, packed, aligned, cache l1
+        c: &mut [[f64simd; NR_LANE]], // MR x NR, aligned, register
+        a: &[[f64; MR]],              // kc x MR (lda), packed-transposed, cache l2 prefetch l1
+        b: &[[f64simd; NR_LANE]],     // kc x NR, packed, aligned, cache l1
         mr: usize,
         kc: usize,
     ) {
         core::hint::assert_unchecked(kc <= KC);
         core::hint::assert_unchecked(mr <= MR);
 
-        let c: &mut [[f64simd; 2]] = transmute(c);
-        let b: &[[f64simd; 2]] = transmute(b);
+        let c: &mut [[f64simd; NR_LANE]] = transmute(c);
+        let b: &[[f64simd; NR_LANE]] = transmute(b);
         if mr == MR {
             for p in 0..kc {
-                let b_p0 = *b.get_unchecked(p).get_unchecked(0);
-                let b_p1 = *b.get_unchecked(p).get_unchecked(1);
                 for i in 0..MR {
                     let a_ip = f64simd::splat(*a.get_unchecked(p).get_unchecked(i));
-                    c.get_unchecked_mut(i).get_unchecked_mut(0).fma_from(b_p0, a_ip);
-                    c.get_unchecked_mut(i).get_unchecked_mut(1).fma_from(b_p1, a_ip);
+                    for j_lane in 0..NR_LANE {
+                        let b_pj = *b.get_unchecked(p).get_unchecked(j_lane);
+                        c.get_unchecked_mut(i).get_unchecked_mut(j_lane).fma_from(b_pj, a_ip);
+                    }
                 }
             }
         } else {
             for p in 0..kc {
-                let b_p0 = *b.get_unchecked(p).get_unchecked(0);
-                let b_p1 = *b.get_unchecked(p).get_unchecked(1);
                 for i in 0..mr {
                     let a_ip = f64simd::splat(*a.get_unchecked(p).get_unchecked(i));
-                    c.get_unchecked_mut(i).get_unchecked_mut(0).fma_from(b_p0, a_ip);
-                    c.get_unchecked_mut(i).get_unchecked_mut(1).fma_from(b_p1, a_ip);
+                    for j_lane in 0..NR_LANE {
+                        let b_pj = *b.get_unchecked(p).get_unchecked(j_lane);
+                        c.get_unchecked_mut(i).get_unchecked_mut(j_lane).fma_from(b_pj, a_ip);
+                    }
                 }
-            }
-        }
-    }
-
-    #[inline]
-    unsafe fn microkernel_mask(
-        c: &mut [[f64simd; 2]], // MR x NR, aligned, register
-        a: &[f64],              // MR x kc (lda), packed, cache l2 prefetch l1
-        b: &[[f64simd; 2]],     // kc x NR, packed, aligned, cache l1
-        mask: &[bool],          // kc
-        kc: usize,
-        lda: usize,
-    ) {
-        core::hint::assert_unchecked(kc <= KC);
-
-        // collect mask indices
-        let mut mask_indices: [usize; KC] = [0; KC];
-        let mut idx = 0;
-        for p in 0..kc {
-            if *mask.get_unchecked(p) {
-                *mask_indices.get_unchecked_mut(idx) = p;
-                idx += 1;
-            }
-        }
-
-        let c: &mut [[f64simd; 2]] = transmute(c);
-        let b: &[[f64simd; 2]] = transmute(b);
-        for p in mask_indices {
-            let b_p0 = *b.get_unchecked(p).get_unchecked(0);
-            let b_p1 = *b.get_unchecked(p).get_unchecked(1);
-            for i in 0..MR {
-                let a_ip = f64simd::splat(*a.as_ptr().add(i * lda + p)); // may overflow, so use as_ptr instead of get_unchecked
-                c.get_unchecked_mut(i).get_unchecked_mut(0).fma_from(b_p0, a_ip);
-                c.get_unchecked_mut(i).get_unchecked_mut(1).fma_from(b_p1, a_ip);
             }
         }
     }
@@ -202,46 +159,56 @@ where
         let ntask = ntask_mc * ntask_nc * ntask_kc;
         let barrier_c: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc)).map(|_| Mutex::new(())).collect();
 
-        let nthreads = rayon::current_num_threads();
-        let mc_pack = MC.div_ceil(MR);
-        let thread_buf_a: Vec<Vec<[[T; MR]; KC]>> = (0..nthreads).map(|_| vec![unsafe { zeroed() }; mc_pack]).collect();
+        // let nthreads = rayon::current_num_threads();
+        // let NR: usize = NR_LANE * LANE;
+        let ntask_mr = MC.div_ceil(MR);
+        // let ntask_nr = NC.div_ceil(NR);
 
-        println!("ntask: {}", ntask);
+        // pack matrix a: [ntask_mc][ntask_kc][ntask_mr][KC][MR]
+        let a_pack: Vec<[[T; MR]; KC]> = unsafe { uninitialized_vec(ntask_mc * ntask_kc * ntask_mr) };
+        (0..ntask_mc * ntask_kc).into_par_iter().for_each(|task_id| {
+            let task_mc = task_id / ntask_kc;
+            let task_kc = task_id % ntask_kc;
+            let idx_m = task_mc * MC;
+            let idx_k = task_kc * KC;
+            let mc = if (task_mc + 1) * MC <= m { MC } else { m - idx_m };
+            let kc = if (task_kc + 1) * KC <= k { KC } else { k - idx_k };
+            let a_pack = unsafe { cast_mut_slice(&a_pack) };
+            for task_mr in 0..mc.div_ceil(MR) {
+                let idx_mr = task_mr * MR;
+                let idx_a_pack = task_mc * (ntask_kc * ntask_mr) + task_kc * ntask_mr + task_mr;
+                let mr = if (task_mr + 1) * MR <= mc { MR } else { mc - idx_mr };
+                for p in 0..kc {
+                    for i in 0..mr {
+                        a_pack[idx_a_pack][p][i] = a[(idx_m + idx_mr + i) * lda + (idx_k + p)];
+                    }
+                }
+            }
+        });
+
         (0..ntask).into_par_iter().for_each(|task_id| {
             let task_m = task_id / (ntask_nc * ntask_kc);
             let task_n = (task_id / ntask_kc) % ntask_nc;
             let task_k = task_id % ntask_kc;
 
             // access buffers
-            let thread_id = rayon::current_thread_index().unwrap();
-            let buf_a: &mut [[[T; MR]; KC]] = unsafe { cast_mut_slice(&thread_buf_a[thread_id]) };
             let mut buf_c: [[T; NC]; MC] = unsafe { zeroed() };
             let slc_c: &mut [T] = buf_c.as_flattened_mut();
 
             // get slices
-            let a = &a[task_m * MC * lda + task_k * KC..];
             let b = &b[task_k * KC * ldb + task_n * NC..];
             let mc = if (task_m + 1) * MC <= m { MC } else { m - task_m * MC };
             let nc = if (task_n + 1) * NC <= n { NC } else { n - task_n * NC };
             let kc = if (task_k + 1) * KC <= k { KC } else { k - task_k * KC };
 
-            // pack a
-            unsafe {
-                for p in 0..kc {
-                    for i in 0..mc {
-                        let i_pack = i / MR;
-                        let i_loc = i % MR;
-                        *buf_a.get_unchecked_mut(i_pack).get_unchecked_mut(p).get_unchecked_mut(i_loc) = *a.get_unchecked(i * lda + p);
-                    }
-                }
-            }
+            let a_pack_mc_kc = &a_pack[task_m * (ntask_kc * ntask_mr) + task_k * ntask_mr..];
 
             unsafe {
                 core::hint::assert_unchecked(mc <= MC);
                 core::hint::assert_unchecked(nc <= NC);
                 core::hint::assert_unchecked(kc <= KC);
             }
-            Self::matmul_loop_2nd(slc_c, buf_a, b, mc, nc, kc, ldb, NC);
+            Self::matmul_loop_2nd(slc_c, a_pack_mc_kc, b, mc, nc, kc, ldb, NC);
 
             // write back to C
             // use barrier to avoid race condition
@@ -257,31 +224,6 @@ where
     }
 }
 
-pub fn microkernel_anyway(
-    c: &mut [[f64simd; 2]], // MR x NR, aligned
-    a: &[[f64; 14]],        // kc x MR (lda), packed-transposed
-    b: &[[f64simd; 2]],     // kc x NR (ldb), packed, aligned
-    mr: usize,
-    kc: usize,
-) {
-    unsafe {
-        MatmulLoops::<f64, 256, 192, 240, 14, 2, 8>::microkernel(c, a, b, mr, kc);
-    }
-}
-
-pub fn microkernel_mask_anyway(
-    c: &mut [[f64simd; 2]], // MR x NR, aligned
-    a: &[f64],              // kc x MR (lda), packed-transposed
-    b: &[[f64simd; 2]],     // kc x NR (ldb), packed, aligned
-    mask: &[bool],          // kc
-    k: usize,
-    lda: usize,
-) {
-    unsafe {
-        MatmulLoops::<f64, 256, 192, 240, 11, 2, 8>::microkernel_mask(c, a, b, mask, k, lda);
-    }
-}
-
 pub fn matmul_anyway_full(
     c: &mut [f64], // MC x NC (ldc), DRAM
     a: &[f64],     // MC x KC (lda), packed, cache l2
@@ -293,7 +235,7 @@ pub fn matmul_anyway_full(
     ldb: usize,
     ldc: usize,
 ) {
-    MatmulLoops::<f64, 240, 192, 240, 10, 2, 8>::matmul_loop_345_parallel(c, a, b, m, n, k, lda, ldb, ldc);
+    MatmulLoops::<f64, 234, 256, 256, 13, 2, 8>::matmul_loop_345_parallel(c, a, b, m, n, k, lda, ldb, ldc);
 }
 
 #[test]
@@ -306,23 +248,25 @@ fn test_matmul_anyway_full() {
     let ldc = n;
     let a: Vec<f64> = (0..m * lda).map(|x| (x as f64).sin()).collect();
     let b: Vec<f64> = (0..k * ldb).map(|x| (x as f64).cos()).collect();
-    let mut c: Vec<f64> = vec![0.0; m * ldc];
+
     let time = std::time::Instant::now();
+    let mut c: Vec<f64> = vec![0.0; m * ldc];
     matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc);
     let elapsed = time.elapsed();
     println!("Elapsed time: {:.3?}", elapsed);
 
-    // use rstsr::prelude::*;
-    // let device = DeviceOpenBLAS::default();
-    // let a_tsr = rt::asarray((&a, [m, k], &device));
-    // let b_tsr = rt::asarray((&b, [k, n], &device));
-    // let time = std::time::Instant::now();
-    // let c_ref = a_tsr % b_tsr;
-    // let c_tsr = rt::asarray((&c, [m, n], &device));
-    // let elapsed = time.elapsed();
-    // let diff = &c_tsr - &c_ref;
-    // println!("Elapsed time (ref): {:.3?}", elapsed);
-    // println!("Max error: {:.6e}", diff.view().abs().max());
+    use rstsr::prelude::*;
+    let device = DeviceOpenBLAS::default();
+    let a_tsr = rt::asarray((&a, [m, k], &device));
+    let b_tsr = rt::asarray((&b, [k, n], &device));
+    let time = std::time::Instant::now();
+    let c_ref = a_tsr % b_tsr;
+    let elapsed = time.elapsed();
+    println!("Elapsed time (ref): {:.3?}", elapsed);
+
+    let c_tsr = rt::asarray((&c, [m, n], &device));
+    let diff = &c_tsr - &c_ref;
+    println!("Max error: {:.6e}", diff.view().abs().max());
 
     // println!("c_tsr\n{c_tsr:15.3}");
     // println!("c_ref\n{c_ref:15.3}");

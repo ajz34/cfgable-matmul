@@ -8,6 +8,7 @@ tarpaulin-report.html
 .idea
 book
 *.npy
+profile.json
 
 # bindgen
 blas_bindgen.h

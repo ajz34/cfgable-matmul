@@ -5,5 +5,5 @@
 #![allow(clippy::identity_op)]
 #![allow(clippy::needless_range_loop)]
 
-pub mod non0tab_dot_loops;
+pub mod dense_dot;
 pub mod prelude;
