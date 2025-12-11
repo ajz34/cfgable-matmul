@@ -5,7 +5,11 @@ edition = "2024"
 
 [dependencies]
 libcint = "0.2"
-# rstsr = "0.6"
+rayon = "1.11"
+duplicate = "2.0"
+num = "0.4"
+rstsr = { version = "0.6", default-features = false, features = ["openblas"] }
+rstsr-openblas = { version = "0.6", features = ["openmp"] }
 
 [profile.dev]
 opt-level = 3

@@ -1,30 +1,46 @@
 pub(crate) use libcint::gto::prelude_dev::*;
 
-pub trait F64SimdExtend {
+pub trait F64SimdExtend<T> {
     #[allow(clippy::missing_safety_doc)]
-    unsafe fn loadu_ptr(src: *const f64) -> Self;
+    unsafe fn loadu_ptr(src: *const T) -> Self;
 
     #[allow(clippy::missing_safety_doc)]
-    unsafe fn storeu_ptr(&self, dst: *mut f64);
+    unsafe fn storeu_ptr(&self, dst: *mut T);
+
+    #[allow(clippy::missing_safety_doc)]
+    unsafe fn get_unchecked(&self, index: usize) -> &T;
+
+    #[allow(clippy::missing_safety_doc)]
+    unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T;
 }
 
-impl F64SimdExtend for f64simd {
+impl<T: Copy, const LANE: usize> F64SimdExtend<T> for FpSimd<T, LANE> {
     #[inline(always)]
-    unsafe fn loadu_ptr(src: *const f64) -> Self {
-        unsafe { FpSimd([*src.add(0), *src.add(1), *src.add(2), *src.add(3), *src.add(4), *src.add(5), *src.add(6), *src.add(7)]) }
+    #[allow(clippy::uninit_assumed_init)]
+    unsafe fn loadu_ptr(src: *const T) -> Self {
+        let mut arr: [T; LANE] = core::mem::MaybeUninit::uninit().assume_init();
+        for i in 0..LANE {
+            arr[i] = *src.add(i);
+        }
+        Self(arr)
     }
 
     #[inline(always)]
-    unsafe fn storeu_ptr(&self, dst: *mut f64) {
-        unsafe {
-            *dst.add(0) = self[0];
-            *dst.add(1) = self[1];
-            *dst.add(2) = self[2];
-            *dst.add(3) = self[3];
-            *dst.add(4) = self[4];
-            *dst.add(5) = self[5];
-            *dst.add(6) = self[6];
-            *dst.add(7) = self[7];
+    unsafe fn storeu_ptr(&self, dst: *mut T) {
+        for i in 0..LANE {
+            *dst.add(i) = *self.0.get_unchecked(i);
         }
     }
+
+    #[inline(always)]
+    unsafe fn get_unchecked(&self, index: usize) -> &T {
+        self.0.get_unchecked(index)
+    }
+
+    #[inline(always)]
+    unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
+        self.0.get_unchecked_mut(index)
+    }
 }
+
+/* #endregion */

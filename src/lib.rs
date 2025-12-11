@@ -3,6 +3,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::identity_op)]
+#![allow(clippy::needless_range_loop)]
 
 pub mod non0tab_dot_loops;
 pub mod prelude;
