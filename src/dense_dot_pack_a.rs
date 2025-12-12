@@ -11,11 +11,11 @@ where
         c: &mut [T],                      // MC x NR (ldc), DRAM
         a: &[[[T; MR]; KC]],              // KC x MC (lda), packed-transposed, cache l2
         b: &[[FpSimd<T, LANE>; NR_LANE]], // KC x NR, packed, aligned, cache l1
-        mc: usize,
-        nr: usize,
-        kc: usize,
-        ldc: usize,
-        barrier: &Mutex<()>,
+        mc: usize,                        // mc, for write to C
+        nr: usize,                        // nr, for write to C
+        kc: usize,                        // kc, to avoid non-necessary / uninitialized access
+        ldc: usize,                       // ldc, for write to C
+        barrier: &Mutex<()>,              // barrier for writing to C
     ) {
         // MR -> MC
         unsafe {
@@ -30,7 +30,7 @@ where
 
             // call micro-kernel
             let mr = if i + MR <= mc { MR } else { mc - i };
-            unsafe { Self::microkernel(&mut c_reg, &a[i_pack], b, mr, kc) }
+            unsafe { Self::microkernel(&mut c_reg, &a[i_pack], b, kc) }
 
             // store C register block to C memory block
             let lock = barrier.lock().unwrap();
@@ -48,16 +48,16 @@ where
     }
 
     #[inline]
-    pub fn matmul_loop_2nd(
+    pub fn matmul_loop_2nd_pack_b(
         c: &mut [T],         // MC x NC (ldc), DRAM
         a: &[[[T; MR]; KC]], // KC x MC (lda), packed-transposed, cache l2
         b: &[T],             // KC x NC, aligned, cache l3 with parallel
-        mc: usize,
-        nc: usize,
-        kc: usize,
-        ldb: usize,
-        ldc: usize,
-        barrier: &Mutex<()>,
+        mc: usize,           // mc, for write to C
+        nc: usize,           // nc, for write to C
+        kc: usize,           // kc, to avoid non-necessary / uninitialized access
+        ldb: usize,          // ldb, for load and pack B
+        ldc: usize,          // ldc, for write to C
+        barrier: &Mutex<()>, // barrier for writing to C
     ) {
         // NR -> NC
         unsafe {
@@ -90,7 +90,7 @@ where
         }
     }
 
-    pub fn matmul_loop_345_parallel(c: &mut [T], a: &[T], b: &[T], m: usize, n: usize, k: usize, lda: usize, ldb: usize, ldc: usize)
+    pub fn matmul_loop_parallel_mnk_pack_a(c: &mut [T], a: &[T], b: &[T], m: usize, n: usize, k: usize, lda: usize, ldb: usize, ldc: usize)
     where
         T: Send + Sync,
     {
@@ -141,7 +141,7 @@ where
             let barrier = &c_barrier[task_m * ntask_nc + task_n];
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
-            Self::matmul_loop_2nd(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, barrier);
+            Self::matmul_loop_2nd_pack_b(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, barrier);
         });
     }
 }
@@ -157,7 +157,7 @@ pub fn matmul_anyway_full(
     ldb: usize,
     ldc: usize,
 ) {
-    MatmulLoops::<f64, 234, 256, 240, 13, 2, 8>::matmul_loop_345_parallel(c, a, b, m, n, k, lda, ldb, ldc);
+    MatmulLoops::<f64, 234, 256, 240, 13, 2, 8>::matmul_loop_parallel_mnk_pack_a(c, a, b, m, n, k, lda, ldb, ldc);
 }
 
 #[test]

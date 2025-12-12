@@ -8,8 +8,7 @@ where
         c: &mut [[FpSimd<T, LANE>; NR_LANE]], // MR x NR, aligned, register
         a: &[[T; MR]],                        // kc x MR (lda), packed-transposed, cache l2 prefetch l1
         b: &[[FpSimd<T, LANE>; NR_LANE]],     // kc x NR, packed, aligned, cache l1
-        mr: usize,
-        kc: usize,
+        kc: usize,                            // kc, to avoid non-necessary / uninitialized access
     );
 }
 
@@ -25,11 +24,9 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
         c: &mut [[FpSimd<f64, LANE>; NR_LANE]], // MR x NR, aligned, register
         a: &[[f64; MR]],                        // kc x MR (lda), packed-transposed, cache l2 prefetch l1
         b: &[[FpSimd<f64, LANE>; NR_LANE]],     // kc x NR, packed, aligned, cache l1
-        mr: usize,
         kc: usize,
     ) {
         core::hint::assert_unchecked(kc <= KC);
-        core::hint::assert_unchecked(mr <= MR);
 
         let c: &mut [[FpSimd<f64, LANE>; NR_LANE]] = transmute(c);
         let b: &[[FpSimd<f64, LANE>; NR_LANE]] = transmute(b);
