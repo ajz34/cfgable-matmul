@@ -5,6 +5,7 @@
 #![allow(clippy::identity_op)]
 #![allow(clippy::needless_range_loop)]
 
-pub mod dense_dot;
+pub mod dense_dot_pack_a;
 pub mod naive_simd;
 pub mod prelude;
+pub mod structs;
