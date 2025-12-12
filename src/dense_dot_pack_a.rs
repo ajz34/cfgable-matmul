@@ -127,10 +127,18 @@ where
             }
         });
 
-        (0..ntask_mc * ntask_nc * ntask_kc).into_par_iter().for_each(|task_id| {
-            let task_m = task_id / (ntask_nc * ntask_kc);
-            let task_n = (task_id / ntask_kc) % ntask_nc;
-            let task_k = task_id % ntask_kc;
+        let task_count = Mutex::new(0); // schedule tasks exactly by deterministic order [m n k]
+        (0..ntask_mc * ntask_nc * ntask_kc).into_par_iter().for_each(|_| {
+            let task_id = {
+                let mut count = task_count.lock().unwrap();
+                let id = *count;
+                *count += 1;
+                id
+            };
+
+            let task_m = task_id % ntask_mc;
+            let task_n = (task_id / ntask_mc) % ntask_nc;
+            let task_k = task_id / (ntask_mc * ntask_nc);
 
             // get slices
             let b = &b[task_k * KC * ldb + task_n * NC..];
@@ -143,114 +151,6 @@ where
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
             Self::matmul_loop_2nd_pack_b(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, barrier);
-        });
-    }
-
-    #[inline]
-    pub fn matmul_loop_2nd(
-        c: &mut [T],                            // MC x NC (ldc), DRAM
-        a: &[[[T; MR]; KC]],                    // KC x MC (lda), packed-transposed, cache l2
-        b: &[[[FpSimd<T, LANE>; NR_LANE]; KC]], // KC x NC, packed-aligned, cache l3 with parallel
-        mc: usize,                              // mc, for write to C
-        nc: usize,                              // nc, for write to C
-        kc: usize,                              // kc, to avoid non-necessary / uninitialized access
-        ldc: usize,                             // ldc, for write to C
-        barrier: &Mutex<()>,                    // barrier for writing to C
-    ) {
-        // NR -> NC
-        unsafe {
-            core::hint::assert_unchecked(mc <= MC);
-            core::hint::assert_unchecked(nc <= NC);
-            core::hint::assert_unchecked(kc <= KC);
-        }
-
-        let NR = NR_LANE * LANE;
-
-        for (idx_j, j) in (0..nc).step_by(NR).enumerate() {
-            let nr = if j + NR <= nc { NR } else { nc - j };
-            Self::matmul_loop_1st(&mut c[j..], a, &b[idx_j], mc, nr, kc, ldc, barrier);
-        }
-    }
-
-    pub fn matmul_loop_parallel_mnk_pack_ab(c: &mut [T], a: &[T], b: &[T], m: usize, n: usize, k: usize, lda: usize, ldb: usize, ldc: usize)
-    where
-        T: Send + Sync,
-    {
-        // compute number of tasks to split
-        let NR = NR_LANE * LANE;
-        let ntask_mc = m.div_ceil(MC);
-        let ntask_nc = n.div_ceil(NC);
-        let ntask_kc = k.div_ceil(KC);
-        let ntask_mr = MC.div_ceil(MR);
-        let ntask_nr = NC.div_ceil(NR);
-
-        // barrier_c: [ntask_mc][ntask_nc]
-        let c_barrier: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc)).map(|_| Mutex::new(())).collect();
-
-        // pack matrix a: [ntask_mc][ntask_kc][ntask_mr][KC][MR]
-        let a_pack: Vec<[[T; MR]; KC]> = unsafe { uninitialized_vec(ntask_mc * ntask_kc * ntask_mr) };
-
-        (0..ntask_mc * ntask_kc).into_par_iter().for_each(|task_id| {
-            let task_mc = task_id / ntask_kc;
-            let task_kc = task_id % ntask_kc;
-            let idx_m = task_mc * MC;
-            let idx_k = task_kc * KC;
-            let mc = if (task_mc + 1) * MC <= m { MC } else { m - idx_m };
-            let kc = if (task_kc + 1) * KC <= k { KC } else { k - idx_k };
-            let a_pack = unsafe { cast_mut_slice(&a_pack) };
-            for task_mr in 0..mc.div_ceil(MR) {
-                let idx_mr = task_mr * MR;
-                let idx_a_pack = task_mc * (ntask_kc * ntask_mr) + task_kc * ntask_mr + task_mr;
-                let mr = if (task_mr + 1) * MR <= mc { MR } else { mc - idx_mr };
-                for p in 0..kc {
-                    for i in 0..mr {
-                        a_pack[idx_a_pack][p][i] = a[(idx_m + idx_mr + i) * lda + (idx_k + p)].clone();
-                    }
-                }
-            }
-        });
-
-        // pack matrix b: [ntask_kc][ntask_nc][ntask_nr][KC][NR_LANE][LANE]
-        let b_pack: Vec<[[FpSimd<T, LANE>; NR_LANE]; KC]> = unsafe { uninitialized_vec(ntask_kc * ntask_nc * ntask_nr) };
-
-        (0..ntask_kc * ntask_nc).into_par_iter().for_each(|task_id| {
-            let task_kc = task_id / ntask_nc;
-            let task_nc = task_id % ntask_nc;
-            let idx_k = task_kc * KC;
-            let idx_n = task_nc * NC;
-            let kc = if (task_kc + 1) * KC <= k { KC } else { k - idx_k };
-            let nc = if (task_nc + 1) * NC <= n { NC } else { n - idx_n };
-            let b_pack = unsafe { cast_mut_slice(&b_pack) };
-            for task_nr in 0..nc.div_ceil(NR) {
-                let idx_nr = task_nr * NR;
-                let idx_b_pack = task_kc * (ntask_nc * ntask_nr) + task_nc * ntask_nr + task_nr;
-                let nr = if (task_nr + 1) * NR <= nc { NR } else { nc - idx_nr };
-                for p in 0..kc {
-                    for jj in 0..nr {
-                        let j_lane = jj / LANE;
-                        let j_offset = jj % LANE;
-                        b_pack[idx_b_pack][p][j_lane][j_offset] = b[(idx_k + p) * ldb + (idx_n + idx_nr + jj)].clone();
-                    }
-                }
-            }
-        });
-
-        (0..ntask_mc * ntask_nc * ntask_kc).into_par_iter().for_each(|task_id| {
-            let task_m = task_id / (ntask_nc * ntask_kc);
-            let task_n = (task_id / ntask_kc) % ntask_nc;
-            let task_k = task_id % ntask_kc;
-
-            // get slices
-            let mc = if (task_m + 1) * MC <= m { MC } else { m - task_m * MC };
-            let nc = if (task_n + 1) * NC <= n { NC } else { n - task_n * NC };
-            let kc = if (task_k + 1) * KC <= k { KC } else { k - task_k * KC };
-
-            let a_pack_mc_kc = &a_pack[task_m * (ntask_kc * ntask_mr) + task_k * ntask_mr..];
-            let b_pack_kc_nc = &b_pack[task_k * (ntask_nc * ntask_nr) + task_n * ntask_nr..];
-            let barrier = &c_barrier[task_m * ntask_nc + task_n];
-            let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
-
-            Self::matmul_loop_2nd(c_mc_nc, a_pack_mc_kc, b_pack_kc_nc, mc, nc, kc, ldc, barrier);
         });
     }
 }
@@ -269,7 +169,7 @@ pub fn matmul_anyway_full(
     // MatmulLoops::<f64, 234, 256, 240, 13, 2,
     // 8>::matmul_loop_parallel_mnk_pack_a(c, a, b, m, n, k, lda, ldb, ldc);
 
-    MatmulLoops::<f64, 234, 256, 240, 13, 2, 8>::matmul_loop_parallel_mnk_pack_ab(c, a, b, m, n, k, lda, ldb, ldc);
+    MatmulLoops::<f64, 234, 256, 240, 13, 2, 8>::matmul_loop_parallel_mnk_pack_a(c, a, b, m, n, k, lda, ldb, ldc);
 }
 
 #[test]
@@ -310,12 +210,12 @@ fn test_matmul_anyway_full() {
 fn test_matmul_faer_full() {
     // taxol, def2-TZVP
     // nelec = 452, nbasis = 2228, grids = 968656 (can be batched by 16384)
-    let m = 3527;
-    let n = 9583;
-    let k = 6581;
-    // let m = 226;
-    // let n = 16384;
-    // let k = 2228;
+    // let m = 3527;
+    // let n = 9583;
+    // let k = 6581;
+    let m = 226;
+    let n = 16384;
+    let k = 2228;
     let lda = k;
     let ldb = n;
     let ldc = n;
