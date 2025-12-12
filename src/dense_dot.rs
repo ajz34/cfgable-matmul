@@ -259,6 +259,59 @@ fn test_matmul_anyway_full() {
     let diff = &c_tsr - &c_ref;
     println!("Max error: {:.6e}", diff.view().abs().max());
 
-    // println!("c_tsr\n{c_tsr:15.3}");
-    // println!("c_ref\n{c_ref:15.3}");
+    println!("c_tsr\n{c_tsr:15.3}");
+    println!("c_ref\n{c_ref:15.3}");
+}
+
+#[test]
+fn test_matmul_faer_full() {
+    // taxol, def2-TZVP
+    // nelec = 452, nbasis = 2228, grids = 968656 (can be batched by 16384)
+    let m = 3527;
+    let n = 9583;
+    let k = 6581;
+    // let m = 226;
+    // let n = 16384;
+    // let k = 2228;
+    let lda = k;
+    let ldb = n;
+    let ldc = n;
+    let a: Vec<f64> = (0..m * lda).map(|x| (x as f64).sin()).collect();
+    let b: Vec<f64> = (0..k * ldb).map(|x| (x as f64).cos()).collect();
+
+    let time = std::time::Instant::now();
+    let mut c: Vec<f64> = vec![0.0; m * ldc];
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc);
+    let elapsed = time.elapsed();
+    println!("Elapsed time: {:.3?}", elapsed);
+
+    let time = std::time::Instant::now();
+    let mut c: Vec<f64> = vec![0.0; m * ldc];
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc);
+    let elapsed = time.elapsed();
+    println!("Elapsed time: {:.3?}", elapsed);
+
+    let time = std::time::Instant::now();
+    let mut c: Vec<f64> = vec![0.0; m * ldc];
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc);
+    let elapsed = time.elapsed();
+    println!("Elapsed time: {:.3?}", elapsed);
+
+    let a = faer::MatRef::from_column_major_slice(&a, m, k);
+    let b = faer::MatRef::from_column_major_slice(&b, k, n);
+
+    let time = std::time::Instant::now();
+    let _c = a.mul(&b);
+    let elapsed = time.elapsed();
+    println!("Elapsed time (faer): {:.3?}", elapsed);
+
+    let time = std::time::Instant::now();
+    let _c = a.mul(&b);
+    let elapsed = time.elapsed();
+    println!("Elapsed time (faer): {:.3?}", elapsed);
+
+    let time = std::time::Instant::now();
+    let _c = a.mul(&b);
+    let elapsed = time.elapsed();
+    println!("Elapsed time (faer): {:.3?}", elapsed);
 }

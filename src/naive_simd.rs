@@ -19,12 +19,8 @@ use num::traits::{MulAdd, Num, NumAssignOps};
 ///
 /// To fully utilize SIMD capabilities, you need to compile by `RUSTFLAGS="-C
 /// target-cpu=native"` or similar flags.
-#[repr(align(32))]
 #[derive(Clone, Debug, Copy)]
 pub struct FpSimd<T: Copy, const LANE: usize>(pub [T; LANE]);
-
-#[allow(non_camel_case_types)]
-pub type f64simd = FpSimd<f64, 8>;
 
 impl<T: Copy, const LANE: usize> Index<usize> for FpSimd<T, LANE> {
     type Output = T;
