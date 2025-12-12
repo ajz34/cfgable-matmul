@@ -45,24 +45,13 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
 
         let c: &mut [[FpSimd<f64, LANE>; NR_LANE]] = transmute(c);
         let b: &[[FpSimd<f64, LANE>; NR_LANE]] = transmute(b);
-        if mr == MR {
-            for p in 0..kc {
-                for i in 0..MR {
-                    let a_ip = FpSimd::splat(*a.get_unchecked(p).get_unchecked(i));
-                    for j_lane in 0..NR_LANE {
-                        let b_pj = *b.get_unchecked(p).get_unchecked(j_lane);
-                        c.get_unchecked_mut(i).get_unchecked_mut(j_lane).fma_from(b_pj, a_ip);
-                    }
-                }
-            }
-        } else {
-            for p in 0..kc {
-                for i in 0..mr {
-                    let a_ip = FpSimd::splat(*a.get_unchecked(p).get_unchecked(i));
-                    for j_lane in 0..NR_LANE {
-                        let b_pj = *b.get_unchecked(p).get_unchecked(j_lane);
-                        c.get_unchecked_mut(i).get_unchecked_mut(j_lane).fma_from(b_pj, a_ip);
-                    }
+        for p in 0..kc {
+            for i in 0..MR {
+                let a_ip = FpSimd::splat(*a.get_unchecked(p).get_unchecked(i));
+                for j_lane in 0..NR_LANE {
+                    let b_pj = *b.get_unchecked(p).get_unchecked(j_lane);
+
+                    c.get_unchecked_mut(i).get_unchecked_mut(j_lane).fma_from(b_pj, a_ip);
                 }
             }
         }
@@ -84,7 +73,7 @@ where
         nr: usize,
         kc: usize,
         ldc: usize,
-        c_barrier: &[Mutex<()>],
+        barrier: &Mutex<()>,
     ) {
         // MR -> MC
         unsafe {
@@ -92,9 +81,6 @@ where
             core::hint::assert_unchecked(nr <= NR_LANE * LANE);
             core::hint::assert_unchecked(kc <= KC);
         }
-
-        let NR = NR_LANE * LANE;
-        let ntask_nr = NC.div_ceil(NR);
 
         for (i_pack, i) in (0..mc).step_by(MR).enumerate() {
             // initialize C register block
@@ -105,7 +91,7 @@ where
             unsafe { Self::microkernel(&mut c_reg, &a[i_pack], b, mr, kc) }
 
             // store C register block to C memory block
-            let c_lock = c_barrier[i_pack * ntask_nr].lock().unwrap();
+            let lock = barrier.lock().unwrap();
             unsafe {
                 for ii in 0..mr {
                     let c_assign = &mut c.get_unchecked_mut((i + ii) * ldc..(i + ii) * ldc + nr);
@@ -115,7 +101,7 @@ where
                     }
                 }
             }
-            drop(c_lock);
+            drop(lock);
         }
     }
 
@@ -129,7 +115,7 @@ where
         kc: usize,
         ldb: usize,
         ldc: usize,
-        c_barrier: &[Mutex<()>],
+        barrier: &Mutex<()>,
     ) {
         // NR -> NC
         unsafe {
@@ -141,19 +127,24 @@ where
         let NR = NR_LANE * LANE;
         let mut buf_b: [[FpSimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() }; // KC x NR, packed, aligned, cache l1
 
-        for (idx_j, j) in (0..nc).step_by(NR).enumerate() {
+        for j in (0..nc).step_by(NR) {
             let nr = if j + NR <= nc { NR } else { nc - j };
-
-            // pack B block
-            for p in 0..kc {
-                for jj in 0..nr {
-                    let j_loc = jj / LANE;
-                    let j_lane = jj % LANE;
-                    buf_b[p][j_loc][j_lane] = b[p * ldb + j + jj];
+            if nr == NR_LANE * LANE {
+                for p in 0..kc {
+                    for j_lane in 0..NR_LANE {
+                        buf_b[p][j_lane] = unsafe { FpSimd::loadu_ptr(b[p * ldb + j + j_lane * LANE..].as_ptr()) };
+                    }
+                }
+            } else {
+                for p in 0..kc {
+                    for jj in 0..nr {
+                        let j_lane = jj / LANE;
+                        let j_offset = jj % LANE;
+                        buf_b[p][j_lane][j_offset] = b[p * ldb + j + jj];
+                    }
                 }
             }
-
-            Self::matmul_loop_1st(&mut c[j..], a, &buf_b, mc, nr, kc, ldc, &c_barrier[idx_j..]);
+            Self::matmul_loop_1st(&mut c[j..], a, &buf_b, mc, nr, kc, ldc, barrier);
         }
     }
 
@@ -162,15 +153,13 @@ where
         T: Send + Sync,
     {
         // compute number of tasks to split
-        let NR: usize = NR_LANE * LANE;
         let ntask_mc = m.div_ceil(MC);
         let ntask_nc = n.div_ceil(NC);
         let ntask_kc = k.div_ceil(KC);
         let ntask_mr = MC.div_ceil(MR);
-        let ntask_nr = NC.div_ceil(NR);
 
-        // barrier_c: [ntask_mc][ntask_nc][ntask_mr][ntask_nr]
-        let c_barrier: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc * ntask_mr * ntask_nr)).map(|_| Mutex::new(())).collect();
+        // barrier_c: [ntask_mc][ntask_nc]
+        let c_barrier: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc)).map(|_| Mutex::new(())).collect();
 
         // pack matrix a: [ntask_mc][ntask_kc][ntask_mr][KC][MR]
         let a_pack: Vec<[[T; MR]; KC]> = unsafe { uninitialized_vec(ntask_mc * ntask_kc * ntask_mr) };
@@ -207,10 +196,10 @@ where
             let kc = if (task_k + 1) * KC <= k { KC } else { k - task_k * KC };
 
             let a_pack_mc_kc = &a_pack[task_m * (ntask_kc * ntask_mr) + task_k * ntask_mr..];
-            let c_barrier_mc_nc = &c_barrier[(task_m * ntask_nc + task_n) * (ntask_mr * ntask_nr)..];
+            let barrier = &c_barrier[task_m * ntask_nc + task_n];
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
-            Self::matmul_loop_2nd(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, c_barrier_mc_nc);
+            Self::matmul_loop_2nd(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, barrier);
         });
     }
 }
@@ -237,8 +226,8 @@ fn test_matmul_anyway_full() {
     let lda = k;
     let ldb = n;
     let ldc = n;
-    let a: Vec<f64> = (0..m * lda).map(|x| (x as f64).sin()).collect();
-    let b: Vec<f64> = (0..k * ldb).map(|x| (x as f64).cos()).collect();
+    let a: Vec<f64> = (0..m * lda).into_par_iter().map(|x| (x as f64).sin()).collect();
+    let b: Vec<f64> = (0..k * ldb).into_par_iter().map(|x| (x as f64).cos()).collect();
 
     let time = std::time::Instant::now();
     let mut c: Vec<f64> = vec![0.0; m * ldc];
@@ -259,8 +248,8 @@ fn test_matmul_anyway_full() {
     let diff = &c_tsr - &c_ref;
     println!("Max error: {:.6e}", diff.view().abs().max());
 
-    println!("c_tsr\n{c_tsr:15.3}");
-    println!("c_ref\n{c_ref:15.3}");
+    // println!("c_tsr\n{c_tsr:15.3}");
+    // println!("c_ref\n{c_ref:15.3}");
 }
 
 #[test]
