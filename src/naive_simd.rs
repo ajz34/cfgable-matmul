@@ -20,9 +20,9 @@ use num::traits::{MulAdd, Num, NumAssignOps};
 /// To fully utilize SIMD capabilities, you need to compile by `RUSTFLAGS="-C
 /// target-cpu=native"` or similar flags.
 #[derive(Clone, Debug, Copy)]
-pub struct FpSimd<T: Copy, const LANE: usize>(pub [T; LANE]);
+pub struct FpSimd<T, const LANE: usize>(pub [T; LANE]);
 
-impl<T: Copy, const LANE: usize> Index<usize> for FpSimd<T, LANE> {
+impl<T, const LANE: usize> Index<usize> for FpSimd<T, LANE> {
     type Output = T;
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
@@ -30,20 +30,14 @@ impl<T: Copy, const LANE: usize> Index<usize> for FpSimd<T, LANE> {
     }
 }
 
-impl<T: Copy, const LANE: usize> IndexMut<usize> for FpSimd<T, LANE> {
+impl<T, const LANE: usize> IndexMut<usize> for FpSimd<T, LANE> {
     #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.0[index]
     }
 }
 
-impl<T: Num + Copy, const LANE: usize> FpSimd<T, LANE> {
-    /// Returns a SIMD object with all lanes set to zero.
-    #[inline(always)]
-    pub fn zero() -> Self {
-        FpSimd([T::zero(); LANE])
-    }
-
+impl<T, const LANE: usize> FpSimd<T, LANE> {
     /// Returns an uninitialized SIMD object.
     ///
     /// # Safety
@@ -55,6 +49,14 @@ impl<T: Num + Copy, const LANE: usize> FpSimd<T, LANE> {
     #[allow(invalid_value)]
     pub unsafe fn uninit() -> Self {
         core::mem::MaybeUninit::uninit().assume_init()
+    }
+}
+
+impl<T: Num + Copy, const LANE: usize> FpSimd<T, LANE> {
+    /// Returns a SIMD object with all lanes set to zero.
+    #[inline(always)]
+    pub fn zero() -> Self {
+        FpSimd([T::zero(); LANE])
     }
 
     /// Returns a SIMD object with all lanes set to `val`.
@@ -90,24 +92,24 @@ mod impl_traits {
     use super::*;
 
     // simd * simd
-    impl<T: Num + Copy, const LANE: usize> Trait for FpSimd<T, LANE> {
+    impl<T: Num + Clone, const LANE: usize> Trait for FpSimd<T, LANE> {
         type Output = Self;
         #[inline(always)]
         fn trait_fn(mut self, rhs: Self) -> Self::Output {
             for i in 0..LANE {
-                self.0[i] = T::trait_fn(self.0[i], rhs.0[i]);
+                self.0[i] = T::trait_fn(self.0[i].clone(), rhs.0[i].clone());
             }
             self
         }
     }
 
     // simd * scalar
-    impl<T: Num + Copy, const LANE: usize> Trait<T> for FpSimd<T, LANE> {
+    impl<T: Num + Clone, const LANE: usize> Trait<T> for FpSimd<T, LANE> {
         type Output = Self;
         #[inline(always)]
         fn trait_fn(mut self, rhs: T) -> Self::Output {
             for i in 0..LANE {
-                self.0[i] = T::trait_fn(self.0[i], rhs);
+                self.0[i] = T::trait_fn(self.0[i].clone(), rhs.clone());
             }
             self
         }
@@ -121,22 +123,22 @@ mod impl_traits {
     [MulAssign] [mul_assign];
     [DivAssign] [div_assign];
 )]
-impl<T: NumAssignOps + Copy, const LANE: usize> Trait for FpSimd<T, LANE> {
+impl<T: NumAssignOps + Clone, const LANE: usize> Trait for FpSimd<T, LANE> {
     #[inline(always)]
     fn trait_fn(&mut self, rhs: Self) {
         for i in 0..LANE {
-            T::trait_fn(&mut self.0[i], rhs.0[i]);
+            T::trait_fn(&mut self.0[i], rhs.0[i].clone());
         }
     }
 }
 
-impl<T: Neg<Output = T> + Copy, const LANE: usize> Neg for FpSimd<T, LANE> {
+impl<T: Neg<Output = T> + Clone, const LANE: usize> Neg for FpSimd<T, LANE> {
     type Output = Self;
     #[inline(always)]
     fn neg(self) -> Self::Output {
         let mut result = self;
         for i in 0..LANE {
-            result.0[i] = -result.0[i];
+            result.0[i] = -result.0[i].clone();
         }
         result
     }
@@ -144,7 +146,7 @@ impl<T: Neg<Output = T> + Copy, const LANE: usize> Neg for FpSimd<T, LANE> {
 
 impl<T, const LANE: usize> FpSimd<T, LANE>
 where
-    T: MulAdd<Output = T> + Copy,
+    T: MulAdd<Output = T> + Clone,
 {
     /// Performs fused multiply-add: `self * b + c`.
     ///
@@ -152,7 +154,7 @@ where
     #[inline(always)]
     pub fn mul_add(mut self, b: FpSimd<T, LANE>, c: FpSimd<T, LANE>) -> FpSimd<T, LANE> {
         for i in 0..LANE {
-            self.0[i] = self.0[i].mul_add(b.0[i], c.0[i]);
+            self.0[i] = self.0[i].clone().mul_add(b.0[i].clone(), c.0[i].clone());
         }
         self
     }
@@ -164,18 +166,18 @@ where
     #[inline(always)]
     pub fn fma_from(&mut self, b: FpSimd<T, LANE>, c: FpSimd<T, LANE>) {
         for i in 0..LANE {
-            self.0[i] = b.0[i].mul_add(c.0[i], self.0[i]);
+            self.0[i] = b.0[i].clone().mul_add(c.0[i].clone(), self.0[i].clone());
         }
     }
 }
 
-impl<T: Copy, const LANE: usize> FpSimd<T, LANE> {
+impl<T: Clone, const LANE: usize> FpSimd<T, LANE> {
     #[inline(always)]
     #[allow(clippy::uninit_assumed_init)]
     pub unsafe fn loadu_ptr(src: *const T) -> Self {
         let mut arr: [T; LANE] = core::mem::MaybeUninit::uninit().assume_init();
         for i in 0..LANE {
-            arr[i] = *src.add(i);
+            arr[i] = (*src.add(i)).clone();
         }
         Self(arr)
     }
@@ -183,7 +185,7 @@ impl<T: Copy, const LANE: usize> FpSimd<T, LANE> {
     #[inline(always)]
     pub unsafe fn storeu_ptr(&self, dst: *mut T) {
         for i in 0..LANE {
-            *dst.add(i) = *self.0.get_unchecked(i);
+            *dst.add(i) = self.0.get_unchecked(i).clone();
         }
     }
 

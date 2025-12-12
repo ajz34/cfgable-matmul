@@ -2,7 +2,7 @@ use crate::prelude::*;
 
 pub trait MatmulMicroKernelAPI<T, const KC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize>
 where
-    T: Mul<Output = T> + AddAssign<T> + Copy,
+    T: Mul<Output = T> + AddAssign<T> + Clone,
 {
     unsafe fn microkernel(
         c: &mut [[FpSimd<T, LANE>; NR_LANE]], // MR x NR, aligned, register
