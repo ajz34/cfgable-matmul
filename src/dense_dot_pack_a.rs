@@ -1,22 +1,13 @@
 use crate::prelude::*;
 
-impl<
-    T,
-    const MC: usize,
-    const KC: usize,
-    const NC: usize,
-    const MR: usize,
-    const NR_LANE: usize,
-    const LANE: usize,
-    const MB: usize,
-    const NB: usize,
-> MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE, MB, NB>
+impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
+    MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE, MB>
 where
     T: Mul<Output = T> + AddAssign<T> + Clone,
     Self: MatmulMicroKernelAPI<T, KC, MR, NR_LANE, LANE>,
 {
     #[inline]
-    pub fn matmul_loop_1st_mr(
+    pub unsafe fn matmul_loop_1st_mr(
         c: &mut [T],                      // MC x NR (ldc), DRAM
         a: &[[[T; MR]; KC]],              // KC x MC (lda), packed-transposed, cache l2
         b: &[[FpSimd<T, LANE>; NR_LANE]], // KC x NR, packed, aligned, cache l1
@@ -24,31 +15,57 @@ where
         nr: usize,                        // nr, for write to C
         kc: usize,                        // kc, to avoid non-necessary / uninitialized access
         ldc: usize,                       // ldc, for write to C
-        barrier: &Mutex<()>,              // barrier for writing to C
+        barrier: &[Mutex<()>],            // barrier for writing to C
     ) {
         // MR -> MC
-        unsafe {
-            core::hint::assert_unchecked(mc <= MC);
-            core::hint::assert_unchecked(nr <= NR_LANE * LANE);
-            core::hint::assert_unchecked(kc <= KC);
-        }
+        core::hint::assert_unchecked(mc <= MC);
+        core::hint::assert_unchecked(nr <= NR_LANE * LANE);
+        core::hint::assert_unchecked(kc <= KC);
 
-        for (i_pack, i) in (0..mc).step_by(MR).enumerate() {
-            // initialize C register block
-            let mut c_reg: [[FpSimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
-
-            // call micro-kernel
+        for (task_i, i) in (0..mc).step_by(MR).enumerate() {
+            let lock = barrier[task_i].lock().unwrap();
             let mr = if i + MR <= mc { MR } else { mc - i };
-            unsafe { Self::microkernel(&mut c_reg, &a[i_pack], b, kc) }
+            core::hint::assert_unchecked(mr <= MR);
 
-            // store C register block to C memory block
-            let lock = barrier.lock().unwrap();
-            unsafe {
+            if nr == NR_LANE * LANE && mr == MR {
+                let mut c_reg: [[FpSimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
+                // load C memory block to C register block
+                for ii in 0..MR {
+                    let c_ptr = &c.as_ptr().add((i + ii) * ldc);
+                    for j_lane in 0..NR_LANE {
+                        c_reg[ii][j_lane] = FpSimd::loadu_ptr(c_ptr.add(j_lane * LANE));
+                    }
+                }
+                // call micro-kernel
+                Self::microkernel(&mut c_reg, &a[task_i], b, kc);
+                // store C register block to C memory block
+                for ii in 0..MR {
+                    let c_ptr = &mut c.as_mut_ptr().add((i + ii) * ldc);
+                    for j_lane in 0..NR_LANE {
+                        c_reg[ii][j_lane].storeu_ptr(c_ptr.add(j_lane * LANE));
+                    }
+                }
+            } else {
+                // avoid out-of-bound access
+                let mut c_reg: [[FpSimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
+                // load C memory block to C register block
                 for ii in 0..mr {
-                    let c_assign = &mut c.get_unchecked_mut((i + ii) * ldc..(i + ii) * ldc + nr);
-                    let c_regslc = core::slice::from_raw_parts(c_reg[ii].as_ptr() as *const T, nr);
-                    for j in 0..nr {
-                        *c_assign.get_unchecked_mut(j) += c_regslc.get_unchecked(j).clone();
+                    let c_mem = &c[(i + ii) * ldc..(i + ii) * ldc + nr];
+                    for jj in 0..nr {
+                        let j_lane = jj / LANE;
+                        let j_offset = jj % LANE;
+                        c_reg[ii][j_lane][j_offset] = c_mem[jj].clone();
+                    }
+                }
+                // call micro-kernel
+                Self::microkernel(&mut c_reg, &a[task_i], b, kc);
+                // store C register block to C memory block
+                for ii in 0..mr {
+                    let c_mem = &mut c[(i + ii) * ldc..(i + ii) * ldc + nr];
+                    for jj in 0..nr {
+                        let j_lane = jj / LANE;
+                        let j_offset = jj % LANE;
+                        c_mem[jj] = c_reg[ii][j_lane][j_offset].clone();
                     }
                 }
             }
@@ -58,15 +75,15 @@ where
 
     #[inline]
     pub fn matmul_loop_2nd_nr_pack_b(
-        c: &mut [T],         // MC x NC (ldc), DRAM
-        a: &[[[T; MR]; KC]], // KC x MC (lda), packed-transposed, cache l2
-        b: &[T],             // KC x NC, aligned, cache l3 with parallel
-        mc: usize,           // mc, for write to C
-        nc: usize,           // nc, for write to C
-        kc: usize,           // kc, to avoid non-necessary / uninitialized access
-        ldb: usize,          // ldb, for load and pack B
-        ldc: usize,          // ldc, for write to C
-        barrier: &Mutex<()>, // barrier for writing to C
+        c: &mut [T],           // MC x NC (ldc), DRAM
+        a: &[[[T; MR]; KC]],   // KC x MC (lda), packed-transposed, cache l2
+        b: &[T],               // KC x NC, aligned, cache l3 with parallel
+        mc: usize,             // mc, for write to C
+        nc: usize,             // nc, for write to C
+        kc: usize,             // kc, to avoid non-necessary / uninitialized access
+        ldb: usize,            // ldb, for load and pack B
+        ldc: usize,            // ldc, for write to C
+        barrier: &[Mutex<()>], // barrier for writing to C
     ) {
         // NR -> NC
         unsafe {
@@ -76,14 +93,16 @@ where
         }
 
         let NR = NR_LANE * LANE;
+        let ntask_mr = MC.div_ceil(MR);
         let mut buf_b: [[FpSimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() }; // KC x NR, packed, aligned, cache l1
 
-        for j in (0..nc).step_by(NR) {
+        for (task_j, j) in (0..nc).step_by(NR).enumerate() {
             let nr = if j + NR <= nc { NR } else { nc - j };
             if nr == NR_LANE * LANE {
                 for p in 0..kc {
+                    let b_ptr = unsafe { b.as_ptr().add(p * ldb + j) };
                     for j_lane in 0..NR_LANE {
-                        buf_b[p][j_lane] = unsafe { FpSimd::loadu_ptr(b[p * ldb + j + j_lane * LANE..].as_ptr()) };
+                        buf_b[p][j_lane] = unsafe { FpSimd::loadu_ptr(b_ptr.add(j_lane * LANE)) };
                     }
                 }
             } else {
@@ -96,7 +115,7 @@ where
                     }
                 }
             }
-            Self::matmul_loop_1st_mr(&mut c[j..], a, &buf_b, mc, nr, kc, ldc, barrier);
+            unsafe { Self::matmul_loop_1st_mr(&mut c[j..], a, &buf_b, mc, nr, kc, ldc, &barrier[task_j * ntask_mr..]) };
         }
     }
 
@@ -105,13 +124,15 @@ where
         T: Send + Sync,
     {
         // compute number of tasks to split
+        let NR = NR_LANE * LANE;
         let ntask_mc = m.div_ceil(MC);
         let ntask_nc = n.div_ceil(NC);
         let ntask_kc = k.div_ceil(KC);
         let ntask_mr = MC.div_ceil(MR);
+        let ntask_nr = NC.div_ceil(NR);
 
-        // barrier_c: [ntask_mc][ntask_nc]
-        let c_barrier: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc)).map(|_| Mutex::new(())).collect();
+        // barrier_c: [ntask_mc][ntask_nc][ntask_nr][ntask_mr]
+        let c_barrier: Vec<Mutex<()>> = (0..(ntask_mc * ntask_nc * ntask_nr * ntask_mr)).map(|_| Mutex::new(())).collect();
 
         // pack matrix a: [ntask_mc][ntask_kc][ntask_mr][KC][MR]
         let a_pack: Vec<[[T; MR]; KC]> = unsafe { uninitialized_vec(ntask_mc * ntask_kc * ntask_mr) };
@@ -156,11 +177,22 @@ where
             let kc = if (task_k + 1) * KC <= k { KC } else { k - task_k * KC };
 
             let a_pack_mc_kc = &a_pack[task_m * (ntask_kc * ntask_mr) + task_k * ntask_mr..];
-            let barrier = &c_barrier[task_m * ntask_nc + task_n];
+            let barrier = &c_barrier[(task_m * ntask_nc + task_n) * (ntask_nr * ntask_mr)..];
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
             Self::matmul_loop_2nd_nr_pack_b(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, barrier);
         });
+    }
+
+    pub fn matmul_loop_macro_mb(c: &mut [T], a: &[T], b: &[T], m: usize, n: usize, k: usize, lda: usize, ldb: usize, ldc: usize)
+    where
+        T: Send + Sync,
+    {
+        let mb_size = if MB == 0 { m } else { MB };
+        for i in (0..m).step_by(mb_size) {
+            let mb = if i + mb_size <= m { mb_size } else { m - i };
+            Self::matmul_loop_parallel_mnk_pack_a(&mut c[i * ldc..], &a[i * lda..], b, mb, n, k, lda, ldb, ldc);
+        }
     }
 }
 
@@ -178,7 +210,7 @@ pub fn matmul_anyway_full(
     // MatmulLoops::<f64, 234, 256, 240, 13, 2,
     // 8>::matmul_loop_parallel_mnk_pack_a(c, a, b, m, n, k, lda, ldb, ldc);
 
-    MatmulLoops::<f64, 234, 256, 240, 13, 2, 8>::matmul_loop_parallel_mnk_pack_a(c, a, b, m, n, k, lda, ldb, ldc);
+    MatmulLoops::<f64, 156, 256, 240, 13, 2, 8, 0>::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc);
 }
 
 #[test]
