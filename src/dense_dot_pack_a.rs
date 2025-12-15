@@ -10,7 +10,7 @@ where
     pub unsafe fn matmul_loop_1st_mr(
         c: &mut [T],                      // MC x NR (ldc), DRAM
         a: &[[[T; MR]; KC]],              // KC x MC (lda), packed-transposed, cache l2
-        b: &[[FpSimd<T, LANE>; NR_LANE]], // KC x NR, packed, aligned, cache l1
+        b: &[[TySimd<T, LANE>; NR_LANE]], // KC x NR, packed, aligned, cache l1
         mc: usize,                        // mc, for write to C
         nr: usize,                        // nr, for write to C
         kc: usize,                        // kc, to avoid non-necessary / uninitialized access
@@ -28,12 +28,12 @@ where
             core::hint::assert_unchecked(mr <= MR);
 
             if nr == NR_LANE * LANE && mr == MR {
-                let mut c_reg: [[FpSimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
+                let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
                 // load C memory block to C register block
                 for ii in 0..MR {
                     let c_ptr = &c.as_ptr().add((i + ii) * ldc);
                     for j_lane in 0..NR_LANE {
-                        c_reg[ii][j_lane] = FpSimd::loadu_ptr(c_ptr.add(j_lane * LANE));
+                        c_reg[ii][j_lane] = TySimd::loadu_ptr(c_ptr.add(j_lane * LANE));
                     }
                 }
                 // call micro-kernel
@@ -47,7 +47,7 @@ where
                 }
             } else {
                 // avoid out-of-bound access
-                let mut c_reg: [[FpSimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
+                let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
                 // load C memory block to C register block
                 for ii in 0..mr {
                     let c_mem = &c[(i + ii) * ldc..(i + ii) * ldc + nr];
@@ -94,7 +94,7 @@ where
 
         let NR = NR_LANE * LANE;
         let ntask_mr = MC.div_ceil(MR);
-        let mut buf_b: [[FpSimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() }; // KC x NR, packed, aligned, cache l1
+        let mut buf_b: [[TySimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() }; // KC x NR, packed, aligned, cache l1
 
         for (task_j, j) in (0..nc).step_by(NR).enumerate() {
             let nr = if j + NR <= nc { NR } else { nc - j };
@@ -102,7 +102,7 @@ where
                 for p in 0..kc {
                     let b_ptr = unsafe { b.as_ptr().add(p * ldb + j) };
                     for j_lane in 0..NR_LANE {
-                        buf_b[p][j_lane] = unsafe { FpSimd::loadu_ptr(b_ptr.add(j_lane * LANE)) };
+                        buf_b[p][j_lane] = unsafe { TySimd::loadu_ptr(b_ptr.add(j_lane * LANE)) };
                     }
                 }
             } else {
@@ -207,10 +207,7 @@ pub fn matmul_anyway_full(
     ldb: usize,
     ldc: usize,
 ) {
-    // MatmulLoops::<f64, 234, 256, 240, 13, 2,
-    // 8>::matmul_loop_parallel_mnk_pack_a(c, a, b, m, n, k, lda, ldb, ldc);
-
-    MatmulLoops::<f64, 156, 256, 240, 13, 2, 8, 0>::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc);
+    MatmulLoops::<f64, 234, 512, 240, 13, 2, 8, 3744>::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc);
 }
 
 #[test]

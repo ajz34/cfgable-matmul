@@ -1,6 +1,6 @@
 use core::ops::*;
 use duplicate::duplicate_item;
-use num::traits::{MulAdd, Num, NumAssignOps};
+use num::traits::{MulAdd, Num};
 
 /* #region simple f64x8 */
 
@@ -20,9 +20,9 @@ use num::traits::{MulAdd, Num, NumAssignOps};
 /// To fully utilize SIMD capabilities, you need to compile by `RUSTFLAGS="-C
 /// target-cpu=native"` or similar flags.
 #[derive(Clone, Debug, Copy)]
-pub struct FpSimd<T, const LANE: usize>(pub [T; LANE]);
+pub struct TySimd<T, const LANE: usize>(pub [T; LANE]);
 
-impl<T, const LANE: usize> Index<usize> for FpSimd<T, LANE> {
+impl<T, const LANE: usize> Index<usize> for TySimd<T, LANE> {
     type Output = T;
     #[inline(always)]
     fn index(&self, index: usize) -> &Self::Output {
@@ -30,14 +30,14 @@ impl<T, const LANE: usize> Index<usize> for FpSimd<T, LANE> {
     }
 }
 
-impl<T, const LANE: usize> IndexMut<usize> for FpSimd<T, LANE> {
+impl<T, const LANE: usize> IndexMut<usize> for TySimd<T, LANE> {
     #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.0[index]
     }
 }
 
-impl<T, const LANE: usize> FpSimd<T, LANE> {
+impl<T, const LANE: usize> TySimd<T, LANE> {
     /// Returns an uninitialized SIMD object.
     ///
     /// # Safety
@@ -52,17 +52,17 @@ impl<T, const LANE: usize> FpSimd<T, LANE> {
     }
 }
 
-impl<T: Num + Copy, const LANE: usize> FpSimd<T, LANE> {
+impl<T: Num + Copy, const LANE: usize> TySimd<T, LANE> {
     /// Returns a SIMD object with all lanes set to zero.
     #[inline(always)]
     pub fn zero() -> Self {
-        FpSimd([T::zero(); LANE])
+        TySimd([T::zero(); LANE])
     }
 
     /// Returns a SIMD object with all lanes set to `val`.
     #[inline(always)]
     pub const fn splat(val: T) -> Self {
-        FpSimd([val; LANE])
+        TySimd([val; LANE])
     }
 
     /// Sets all lanes to `val`.
@@ -77,7 +77,7 @@ impl<T: Num + Copy, const LANE: usize> FpSimd<T, LANE> {
     where
         F: Fn(T) -> T,
     {
-        FpSimd(self.0.map(f))
+        TySimd(self.0.map(f))
     }
 }
 
@@ -92,7 +92,7 @@ mod impl_traits {
     use super::*;
 
     // simd * simd
-    impl<T: Num + Clone, const LANE: usize> Trait for FpSimd<T, LANE> {
+    impl<T: Trait<Output = T> + Clone, const LANE: usize> Trait for TySimd<T, LANE> {
         type Output = Self;
         #[inline(always)]
         fn trait_fn(mut self, rhs: Self) -> Self::Output {
@@ -104,7 +104,7 @@ mod impl_traits {
     }
 
     // simd * scalar
-    impl<T: Num + Clone, const LANE: usize> Trait<T> for FpSimd<T, LANE> {
+    impl<T: Trait<Output = T> + Clone, const LANE: usize> Trait<T> for TySimd<T, LANE> {
         type Output = Self;
         #[inline(always)]
         fn trait_fn(mut self, rhs: T) -> Self::Output {
@@ -123,7 +123,7 @@ mod impl_traits {
     [MulAssign] [mul_assign];
     [DivAssign] [div_assign];
 )]
-impl<T: NumAssignOps + Clone, const LANE: usize> Trait for FpSimd<T, LANE> {
+impl<T: Trait + Clone, const LANE: usize> Trait for TySimd<T, LANE> {
     #[inline(always)]
     fn trait_fn(&mut self, rhs: Self) {
         for i in 0..LANE {
@@ -132,7 +132,7 @@ impl<T: NumAssignOps + Clone, const LANE: usize> Trait for FpSimd<T, LANE> {
     }
 }
 
-impl<T: Neg<Output = T> + Clone, const LANE: usize> Neg for FpSimd<T, LANE> {
+impl<T: Neg<Output = T> + Clone, const LANE: usize> Neg for TySimd<T, LANE> {
     type Output = Self;
     #[inline(always)]
     fn neg(self) -> Self::Output {
@@ -144,7 +144,7 @@ impl<T: Neg<Output = T> + Clone, const LANE: usize> Neg for FpSimd<T, LANE> {
     }
 }
 
-impl<T, const LANE: usize> FpSimd<T, LANE>
+impl<T, const LANE: usize> TySimd<T, LANE>
 where
     T: MulAdd<Output = T> + Clone,
 {
@@ -152,7 +152,7 @@ where
     ///
     /// This is similar function to [`MulAdd::mul_add`].
     #[inline(always)]
-    pub fn mul_add(mut self, b: FpSimd<T, LANE>, c: FpSimd<T, LANE>) -> FpSimd<T, LANE> {
+    pub fn mul_add(mut self, b: TySimd<T, LANE>, c: TySimd<T, LANE>) -> TySimd<T, LANE> {
         for i in 0..LANE {
             self.0[i] = self.0[i].clone().mul_add(b.0[i].clone(), c.0[i].clone());
         }
@@ -162,16 +162,16 @@ where
     /// Performs fused multiply-add: `self = self + b * c`.
     ///
     /// Note that the order of multiplication and addition is different from
-    /// [`FpSimd::mul_add`].
+    /// [`TySimd::mul_add`].
     #[inline(always)]
-    pub fn fma_from(&mut self, b: FpSimd<T, LANE>, c: FpSimd<T, LANE>) {
+    pub fn fma_from(&mut self, b: TySimd<T, LANE>, c: TySimd<T, LANE>) {
         for i in 0..LANE {
             self.0[i] = b.0[i].clone().mul_add(c.0[i].clone(), self.0[i].clone());
         }
     }
 }
 
-impl<T: Clone, const LANE: usize> FpSimd<T, LANE> {
+impl<T: Clone, const LANE: usize> TySimd<T, LANE> {
     #[inline(always)]
     #[allow(clippy::uninit_assumed_init)]
     pub unsafe fn loadu_ptr(src: *const T) -> Self {
