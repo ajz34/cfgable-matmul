@@ -12,7 +12,17 @@ where
     );
 }
 
-pub struct MatmulLoops<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize> {
+pub struct MatmulLoops<
+    T,
+    const MC: usize,
+    const KC: usize,
+    const NC: usize,
+    const MR: usize,
+    const NR_LANE: usize,
+    const LANE: usize,
+    const MB: usize = 0,
+    const NB: usize = 0,
+> {
     _phantom: core::marker::PhantomData<T>,
 }
 

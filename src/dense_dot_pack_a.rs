@@ -1,13 +1,22 @@
 use crate::prelude::*;
 
-impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize>
-    MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE>
+impl<
+    T,
+    const MC: usize,
+    const KC: usize,
+    const NC: usize,
+    const MR: usize,
+    const NR_LANE: usize,
+    const LANE: usize,
+    const MB: usize,
+    const NB: usize,
+> MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE, MB, NB>
 where
     T: Mul<Output = T> + AddAssign<T> + Clone,
     Self: MatmulMicroKernelAPI<T, KC, MR, NR_LANE, LANE>,
 {
     #[inline]
-    pub fn matmul_loop_1st(
+    pub fn matmul_loop_1st_mr(
         c: &mut [T],                      // MC x NR (ldc), DRAM
         a: &[[[T; MR]; KC]],              // KC x MC (lda), packed-transposed, cache l2
         b: &[[FpSimd<T, LANE>; NR_LANE]], // KC x NR, packed, aligned, cache l1
@@ -48,7 +57,7 @@ where
     }
 
     #[inline]
-    pub fn matmul_loop_2nd_pack_b(
+    pub fn matmul_loop_2nd_nr_pack_b(
         c: &mut [T],         // MC x NC (ldc), DRAM
         a: &[[[T; MR]; KC]], // KC x MC (lda), packed-transposed, cache l2
         b: &[T],             // KC x NC, aligned, cache l3 with parallel
@@ -87,7 +96,7 @@ where
                     }
                 }
             }
-            Self::matmul_loop_1st(&mut c[j..], a, &buf_b, mc, nr, kc, ldc, barrier);
+            Self::matmul_loop_1st_mr(&mut c[j..], a, &buf_b, mc, nr, kc, ldc, barrier);
         }
     }
 
@@ -150,7 +159,7 @@ where
             let barrier = &c_barrier[task_m * ntask_nc + task_n];
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
-            Self::matmul_loop_2nd_pack_b(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, barrier);
+            Self::matmul_loop_2nd_nr_pack_b(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, barrier);
         });
     }
 }
