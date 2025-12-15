@@ -41,11 +41,10 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
         let b: &[[TySimd<f64, LANE>; NR_LANE]] = transmute(b);
         for p in 0..kc {
             for i in 0..MR {
-                let a_ip = TySimd::splat(*a.get_unchecked(p).get_unchecked(i));
+                let a_ip = TySimd::splat(a[p][i]);
                 for j_lane in 0..NR_LANE {
-                    let b_pj = *b.get_unchecked(p).get_unchecked(j_lane);
-
-                    c.get_unchecked_mut(i).get_unchecked_mut(j_lane).fma_from(b_pj, a_ip);
+                    let b_pj = b[p][j_lane];
+                    c[i][j_lane].fma_from(a_ip, b_pj);
                 }
             }
         }
