@@ -155,6 +155,7 @@ where
         lda: usize,
         ldb: usize,
         ldc: usize,
+        transa: bool,
         transb: bool,
     ) where
         T: Send + Sync,
@@ -185,10 +186,21 @@ where
                 let idx_mr = task_mr * MR;
                 let idx_a_pack = task_mc * (ntask_kc * ntask_mr) + task_kc * ntask_mr + task_mr;
                 let mr = if (task_mr + 1) * MR <= mc { MR } else { mc - idx_mr };
-                for p in 0..kc {
-                    for i in 0..mr {
-                        a_pack[idx_a_pack][p][i] = a[(idx_m + idx_mr + i) * lda + (idx_k + p)].clone();
-                    }
+                match transa {
+                    true => {
+                        for p in 0..kc {
+                            for i in 0..mr {
+                                a_pack[idx_a_pack][p][i] = a[(idx_k + p) * lda + (idx_m + idx_mr + i)].clone();
+                            }
+                        }
+                    },
+                    false => {
+                        for p in 0..kc {
+                            for i in 0..mr {
+                                a_pack[idx_a_pack][p][i] = a[(idx_m + idx_mr + i) * lda + (idx_k + p)].clone();
+                            }
+                        }
+                    },
                 }
             }
         });
@@ -233,6 +245,7 @@ where
         lda: usize,
         ldb: usize,
         ldc: usize,
+        transa: bool,
         transb: bool,
     ) where
         T: Send + Sync,
@@ -240,7 +253,12 @@ where
         let mb_size = if MB == 0 { m } else { MB };
         for i in (0..m).step_by(mb_size) {
             let mb = if i + mb_size <= m { mb_size } else { m - i };
-            Self::matmul_loop_parallel_mnk_pack_a(&mut c[i * ldc..], &a[i * lda..], b, mb, n, k, lda, ldb, ldc, transb);
+            let a_slc = match transa {
+                true => &a[i..],
+                false => &a[i * lda..],
+            };
+            let c_slc = &mut c[i * ldc..];
+            Self::matmul_loop_parallel_mnk_pack_a(c_slc, a_slc, b, mb, n, k, lda, ldb, ldc, transa, transb);
         }
     }
 }
@@ -255,9 +273,10 @@ pub fn matmul_anyway_full(
     lda: usize,
     ldb: usize,
     ldc: usize,
+    transa: bool,
     transb: bool,
 ) {
-    MatmulLoops::<f64, 234, 512, 240, 13, 2, 8, 3744>::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc, transb);
+    MatmulLoops::<f64, 234, 512, 240, 13, 2, 8, 2360>::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc, transa, transb);
 }
 
 #[test]
@@ -273,7 +292,7 @@ fn test_matmul_anyway_full() {
 
     let time = std::time::Instant::now();
     let mut c: Vec<f64> = vec![0.0; m * ldc];
-    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false);
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false, false);
     let elapsed = time.elapsed();
     println!("Elapsed time: {:.3?}", elapsed);
 
@@ -307,7 +326,7 @@ fn test_matmul_anyway_transb() {
 
     let time = std::time::Instant::now();
     let mut c: Vec<f64> = vec![0.0; m * ldc];
-    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, true);
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false, true);
     let elapsed = time.elapsed();
     println!("Elapsed time: {:.3?}", elapsed);
 
@@ -317,6 +336,40 @@ fn test_matmul_anyway_transb() {
     let b_tsr = rt::asarray((&b, [n, k], &device));
     let time = std::time::Instant::now();
     let c_ref = a_tsr % b_tsr.t();
+    let elapsed = time.elapsed();
+    println!("Elapsed time (ref): {:.3?}", elapsed);
+
+    let c_tsr = rt::asarray((&c, [m, n], &device));
+    let diff = &c_tsr - &c_ref;
+    println!("Max error: {:.6e}", diff.view().abs().max());
+
+    // println!("c_tsr\n{c_tsr:15.3}");
+    // println!("c_ref\n{c_ref:15.3}");
+}
+
+#[test]
+fn test_matmul_anyway_transa() {
+    let m = 3527;
+    let n = 9583;
+    let k = 6581;
+    let lda = m;
+    let ldb = n;
+    let ldc = n;
+    let a: Vec<f64> = (0..k * lda).into_par_iter().map(|x| (x as f64).sin()).collect();
+    let b: Vec<f64> = (0..k * ldb).into_par_iter().map(|x| (x as f64).cos()).collect();
+
+    let time = std::time::Instant::now();
+    let mut c: Vec<f64> = vec![0.0; m * ldc];
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, true, false);
+    let elapsed = time.elapsed();
+    println!("Elapsed time: {:.3?}", elapsed);
+
+    use rstsr::prelude::*;
+    let device = DeviceOpenBLAS::default();
+    let a_tsr = rt::asarray((&a, [k, m], &device));
+    let b_tsr = rt::asarray((&b, [k, n], &device));
+    let time = std::time::Instant::now();
+    let c_ref = a_tsr.t() % b_tsr;
     let elapsed = time.elapsed();
     println!("Elapsed time (ref): {:.3?}", elapsed);
 
@@ -346,19 +399,19 @@ fn test_matmul_faer_full() {
 
     let time = std::time::Instant::now();
     let mut c: Vec<f64> = vec![0.0; m * ldc];
-    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false);
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false, false);
     let elapsed = time.elapsed();
     println!("Elapsed time: {:.3?}", elapsed);
 
     let time = std::time::Instant::now();
     let mut c: Vec<f64> = vec![0.0; m * ldc];
-    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false);
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false, false);
     let elapsed = time.elapsed();
     println!("Elapsed time: {:.3?}", elapsed);
 
     let time = std::time::Instant::now();
     let mut c: Vec<f64> = vec![0.0; m * ldc];
-    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false);
+    matmul_anyway_full(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false, false);
     let elapsed = time.elapsed();
     println!("Elapsed time: {:.3?}", elapsed);
 
