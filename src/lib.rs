@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::needless_range_loop)]
+#![allow(clippy::too_many_arguments)]
 #![doc = include_str!("principle-loops.md")]
 
 pub mod impl_matmul;

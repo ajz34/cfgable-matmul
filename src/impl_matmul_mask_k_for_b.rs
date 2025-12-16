@@ -44,8 +44,6 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
 
 /* #endregion microkernel-traits */
 
-type IndicesGenForB = dyn Fn(Range<usize>, Range<usize>, usize) -> Vec<Vec<usize>> + Send + Sync;
-
 impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
     MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE, MB>
 where
@@ -125,19 +123,30 @@ where
     }
 
     #[inline]
-    pub fn pack_b_no_trans_mask_k_for_b(
+    pub fn pack_b_no_trans_non0tab(
         dst: &mut [[TySimd<T, LANE>; NR_LANE]],
         src: &[T],
         kc: usize,
         nr: usize,
         ldb: usize,
-        indices_k_for_b: &[usize],
-    ) {
+        non0tab: &[u8],
+        nblk: usize,
+    ) -> ([usize; KC], usize) {
         unsafe { core::hint::assert_unchecked(kc <= KC) };
         unsafe { core::hint::assert_unchecked(nr <= NR_LANE * LANE) };
 
+        // generate indices_k_for_b
+        let mut indices_k_for_b = [0; KC];
+        let mut cnt_k_for_b: usize = 0;
+        for p in 0..kc {
+            if non0tab[p * nblk] != 0 {
+                indices_k_for_b[cnt_k_for_b] = p;
+                cnt_k_for_b += 1;
+            }
+        }
+
         if nr == NR_LANE * LANE {
-            for (idx_p, &p) in indices_k_for_b.iter().enumerate() {
+            for (idx_p, &p) in indices_k_for_b[..cnt_k_for_b].iter().enumerate() {
                 unsafe { core::hint::assert_unchecked(idx_p < kc) };
                 unsafe { core::hint::assert_unchecked(p < kc) };
                 let src_ptr = unsafe { src.as_ptr().add(p * ldb) };
@@ -147,7 +156,7 @@ where
             }
         } else {
             // avoid out-of-bound access
-            for (idx_p, &p) in indices_k_for_b.iter().enumerate() {
+            for (idx_p, &p) in indices_k_for_b[..cnt_k_for_b].iter().enumerate() {
                 unsafe { core::hint::assert_unchecked(idx_p < kc) };
                 unsafe { core::hint::assert_unchecked(p < kc) };
                 for jj in 0..nr {
@@ -158,24 +167,27 @@ where
                 }
             }
         }
+
+        (indices_k_for_b, cnt_k_for_b)
     }
 
     #[inline]
-    pub fn matmul_loop_2nd_nr_pack_b_mask_k_for_b(
-        c: &mut [T],                         // MC x NC (ldc), DRAM
-        a: &[[[T; MR]; KC]],                 // KC x MC (lda), packed-transposed, cache l2
-        b: &[T],                             // KC x NC, aligned, cache l3 with parallel
-        mc: usize,                           // mc, for write to C
-        nc: usize,                           // nc, for write to C
-        kc: usize,                           // kc, to avoid non-necessary / uninitialized access
-        ldb: usize,                          // ldb, for load and pack B
-        ldc: usize,                          // ldc, for write to C
-        transb: bool,                        // whether B is transposed
-        barrier: &[Mutex<()>],               // barrier for writing to C
-        indices_k_for_b_per_nr: &[&[usize]], // per-NR compressed-kc indices for B
+    pub fn matmul_loop_2nd_nr_pack_b_non0tab<const BLKNR: usize>(
+        c: &mut [T],           // MC x NC (ldc), DRAM
+        a: &[[[T; MR]; KC]],   // KC x MC (lda), packed-transposed, cache l2
+        b: &[T],               // KC x NC, aligned, cache l3 with parallel
+        mc: usize,             // mc, for write to C
+        nc: usize,             // nc, for write to C
+        kc: usize,             // kc, to avoid non-necessary / uninitialized access
+        ldb: usize,            // ldb, for load and pack B
+        ldc: usize,            // ldc, for write to C
+        transb: bool,          // whether B is transposed
+        barrier: &[Mutex<()>], // barrier for writing to C
+        non0tab: &[u8],
+        nblk: usize,
     ) {
         if transb {
-            unimplemented!("transb=true is not implemented in matmul_loop_2nd_nr_pack_b_mask_k_for_b");
+            unimplemented!("transb=true is not implemented in matmul_loop_2nd_nr_pack_b_non0tab");
         }
 
         // NR -> NC
@@ -191,8 +203,9 @@ where
 
         for (task_j, j) in (0..nc).step_by(NR).enumerate() {
             let nr = if j + NR <= nc { NR } else { nc - j };
-            let indices_k_for_b = indices_k_for_b_per_nr[task_j];
-            Self::pack_b_no_trans_mask_k_for_b(&mut buf_b, &b[j * ldb..], kc, nr, ldb, indices_k_for_b);
+            let task_tab = task_j / BLKNR;
+            let (indices_k_for_b, cnt_k_for_b) =
+                Self::pack_b_no_trans_non0tab(&mut buf_b, &b[j..], kc, nr, ldb, &non0tab[task_tab..], nblk);
             unsafe {
                 Self::matmul_loop_1st_mr_mask_k_for_b(
                     &mut c[j..],
@@ -202,14 +215,14 @@ where
                     nr,
                     kc,
                     ldc,
-                    indices_k_for_b,
+                    &indices_k_for_b[..cnt_k_for_b],
                     &barrier[task_j * ntask_mr..],
                 )
             };
         }
     }
 
-    pub fn matmul_loop_parallel_mnk_pack_a_mask_for_b(
+    pub fn matmul_loop_parallel_mnk_pack_a_non0tab<const BLKNR: usize>(
         c: &mut [T],
         a: &[T],
         b: &[T],
@@ -221,7 +234,8 @@ where
         ldc: usize,
         transa: bool,
         transb: bool,
-        indices_k_for_b_generator: &IndicesGenForB,
+        non0tab: &[u8],
+        nblk: usize,
     ) where
         T: Send + Sync,
     {
@@ -281,20 +295,18 @@ where
 
             // get slices
             let b = &b[task_k * KC * ldb + task_n * NC..];
+            let task_tab = (task_n * NC) / (BLKNR * NR);
+            let non0tab = &non0tab[task_tab..];
 
             let mc = if (task_m + 1) * MC <= m { MC } else { m - task_m * MC };
             let nc = if (task_n + 1) * NC <= n { NC } else { n - task_n * NC };
             let kc = if (task_k + 1) * KC <= k { KC } else { k - task_k * KC };
 
-            // get indices_k_for_b list for current task_n
-            let indices_k_for_b_per_nr = indices_k_for_b_generator(task_k * KC..(task_k * KC + kc), task_n * NC..(task_n * NC + nc), NR);
-            let indices_k_for_b_per_nr: Vec<&[usize]> = indices_k_for_b_per_nr.iter().map(|b| b.as_ref()).collect();
-
             let a_pack_mc_kc = &a_pack[task_m * (ntask_kc * ntask_mr) + task_k * ntask_mr..];
             let barrier = &c_barrier[(task_m * ntask_nc + task_n) * (ntask_nr * ntask_mr)..];
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
-            Self::matmul_loop_2nd_nr_pack_b_mask_k_for_b(
+            Self::matmul_loop_2nd_nr_pack_b_non0tab::<BLKNR>(
                 c_mc_nc,
                 a_pack_mc_kc,
                 b,
@@ -305,12 +317,13 @@ where
                 ldc,
                 transb,
                 barrier,
-                &indices_k_for_b_per_nr,
+                non0tab,
+                nblk,
             );
         });
     }
 
-    pub fn matmul_loop_macro_mb_mask_k_for_b(
+    pub fn matmul_loop_macro_mb_non0tab<const BLKNR: usize>(
         c: &mut [T],
         a: &[T],
         b: &[T],
@@ -322,7 +335,8 @@ where
         ldc: usize,
         transa: bool,
         transb: bool,
-        indices_k_for_b_generator: &IndicesGenForB,
+        non0tab: &[u8],
+        nblk: usize,
     ) where
         T: Send + Sync,
     {
@@ -334,25 +348,12 @@ where
                 false => &a[i * lda..],
             };
             let c_slc = &mut c[i * ldc..];
-            Self::matmul_loop_parallel_mnk_pack_a_mask_for_b(
-                c_slc,
-                a_slc,
-                b,
-                mb,
-                n,
-                k,
-                lda,
-                ldb,
-                ldc,
-                transa,
-                transb,
-                indices_k_for_b_generator,
-            );
+            Self::matmul_loop_parallel_mnk_pack_a_non0tab::<BLKNR>(c_slc, a_slc, b, mb, n, k, lda, ldb, ldc, transa, transb, non0tab, nblk);
         }
     }
 }
 
-pub fn matmul_anyway_full_mask_k_for_b(
+pub fn matmul_anyway_full_non0tab(
     c: &mut [f64],
     a: &[f64],
     b: &[f64],
@@ -364,21 +365,11 @@ pub fn matmul_anyway_full_mask_k_for_b(
     ldc: usize,
     transa: bool,
     transb: bool,
-    indices_k_for_b_generator: &IndicesGenForB,
+    non0tab: &[u8],
+    nblk: usize,
 ) {
-    MatmulLoops::<f64, 234, 512, 240, 14, 2, 8, 2360>::matmul_loop_macro_mb_mask_k_for_b(
-        c,
-        a,
-        b,
-        m,
-        n,
-        k,
-        lda,
-        ldb,
-        ldc,
-        transa,
-        transb,
-        indices_k_for_b_generator,
+    MatmulLoops::<f64, 234, 512, 240, 13, 2, 8, 2360>::matmul_loop_macro_mb_non0tab::<3>(
+        c, a, b, m, n, k, lda, ldb, ldc, transa, transb, non0tab, nblk,
     );
 }
 
@@ -413,38 +404,9 @@ fn test_matmul_anyway_full_mask_k_for_b() {
         }
     });
 
-    // process non0tab to generate indices_k_for_b
-    let NR = 16;
-    let KC = 512;
-    let ntask_kc = k.div_ceil(KC);
-    let ntask_nr = n.div_ceil(NR);
-    let indices_k_for_b_list: Vec<Vec<Vec<usize>>> = vec![vec![Vec::new(); ntask_nr]; ntask_kc];
-    (0..ntask_kc).into_par_iter().for_each(|task_kc| {
-        let indices_k_for_b_list = unsafe { cast_mut_slice(&indices_k_for_b_list) };
-        let k_start = task_kc * KC;
-        let k_end = ((task_kc + 1) * KC).min(k);
-        for task_nr in 0..ntask_nr {
-            let n_start = task_nr * NR;
-            let task_non0tab = n_start / BLKSIZE;
-            let indices = &mut indices_k_for_b_list[task_kc][task_nr];
-            for p in k_start..k_end {
-                if non0tab[p * nblk + task_non0tab] != 0 {
-                    indices.push(p - k_start);
-                }
-            }
-        }
-    });
-
-    let indices_k_for_b_generator = move |range_k: Range<usize>, range_n: Range<usize>, _nr: usize| {
-        let task_kc = range_k.start / KC;
-        let task_nr_start = range_n.start / NR;
-        let task_nr_end = range_n.end.div_ceil(NR);
-        indices_k_for_b_list[task_kc][task_nr_start..task_nr_end].to_vec()
-    };
-
     let time = std::time::Instant::now();
     let mut c: Vec<f64> = vec![0.0; m * ldc];
-    matmul_anyway_full_mask_k_for_b(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false, false, &indices_k_for_b_generator);
+    matmul_anyway_full_non0tab(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false, false, &non0tab, nblk);
     let elapsed = time.elapsed();
     println!("Elapsed time (mask_k_for_b): {:.3?}", elapsed);
 
