@@ -75,6 +75,9 @@ where
 
     #[inline]
     pub fn pack_b_no_trans(dst: &mut [[TySimd<T, LANE>; NR_LANE]], src: &[T], kc: usize, nr: usize, ldb: usize) {
+        unsafe { core::hint::assert_unchecked(kc <= KC) };
+        unsafe { core::hint::assert_unchecked(nr <= NR_LANE * LANE) };
+
         if nr == NR_LANE * LANE {
             for p in 0..kc {
                 let b_ptr = unsafe { src.as_ptr().add(p * ldb) };
@@ -96,13 +99,17 @@ where
 
     #[inline]
     pub fn pack_b_trans(dst: &mut [[TySimd<T, LANE>; NR_LANE]], src: &[T], kc: usize, nr: usize, ldb: usize, buf: &mut [T]) {
+        unsafe { core::hint::assert_unchecked(kc <= KC) };
+        unsafe { core::hint::assert_unchecked(nr <= NR_LANE * LANE) };
+
         // first copy to temporary buffer without transpose
         for j in 0..nr {
             buf[j * KC..j * KC + kc].clone_from_slice(&src[j * ldb..j * ldb + kc]);
         }
 
+        // then transpose to dst
         let dst_slc = unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut T, KC * NR_LANE * LANE) };
-        for p in 0..kc {
+        for p in 0..KC {
             for j in 0..NR_LANE * LANE {
                 dst_slc[p * NR_LANE * LANE + j] = buf[j * KC + p].clone();
             }
@@ -119,8 +126,8 @@ where
         kc: usize,             // kc, to avoid non-necessary / uninitialized access
         ldb: usize,            // ldb, for load and pack B
         ldc: usize,            // ldc, for write to C
+        transb: bool,          // whether B is transposed
         barrier: &[Mutex<()>], // barrier for writing to C
-        transb: bool,
     ) {
         // NR -> NC
         unsafe {
@@ -186,26 +193,19 @@ where
                 let idx_mr = task_mr * MR;
                 let idx_a_pack = task_mc * (ntask_kc * ntask_mr) + task_kc * ntask_mr + task_mr;
                 let mr = if (task_mr + 1) * MR <= mc { MR } else { mc - idx_mr };
-                match transa {
-                    true => {
-                        for p in 0..kc {
-                            for i in 0..mr {
-                                a_pack[idx_a_pack][p][i] = a[(idx_k + p) * lda + (idx_m + idx_mr + i)].clone();
-                            }
+                for p in 0..kc {
+                    for i in 0..mr {
+                        match transa {
+                            true => a_pack[idx_a_pack][p][i] = a[(idx_k + p) * lda + (idx_m + idx_mr + i)].clone(),
+                            false => a_pack[idx_a_pack][p][i] = a[(idx_m + idx_mr + i) * lda + (idx_k + p)].clone(),
                         }
-                    },
-                    false => {
-                        for p in 0..kc {
-                            for i in 0..mr {
-                                a_pack[idx_a_pack][p][i] = a[(idx_m + idx_mr + i) * lda + (idx_k + p)].clone();
-                            }
-                        }
-                    },
+                    }
                 }
             }
         });
 
-        let task_count = Mutex::new(0); // schedule tasks exactly by deterministic order [m n k]
+        // schedule tasks exactly by deterministic order [m n k]
+        let task_count = Mutex::new(0);
         (0..ntask_mc * ntask_nc * ntask_kc).into_par_iter().for_each(|_| {
             let task_id = {
                 let mut count = task_count.lock().unwrap();
@@ -231,7 +231,7 @@ where
             let barrier = &c_barrier[(task_m * ntask_nc + task_n) * (ntask_nr * ntask_mr)..];
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
-            Self::matmul_loop_2nd_nr_pack_b(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, barrier, transb);
+            Self::matmul_loop_2nd_nr_pack_b(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, transb, barrier);
         });
     }
 

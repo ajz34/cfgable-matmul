@@ -5,6 +5,7 @@
 #![doc = include_str!("principle-loops.md")]
 
 pub mod impl_matmul;
+pub mod impl_matmul_mask_k_for_b;
 pub mod naive_simd;
 pub mod prelude;
 pub mod structs;

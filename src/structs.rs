@@ -36,6 +36,8 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
         kc: usize,
     ) {
         core::hint::assert_unchecked(kc <= KC);
+        core::hint::assert_unchecked(a.len() >= kc);
+        core::hint::assert_unchecked(c.len() == MR);
 
         let c: &mut [[TySimd<f64, LANE>; NR_LANE]] = transmute(c);
         let b: &[[TySimd<f64, LANE>; NR_LANE]] = transmute(b);
