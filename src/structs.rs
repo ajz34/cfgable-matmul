@@ -37,6 +37,7 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
     ) {
         core::hint::assert_unchecked(kc <= KC);
         core::hint::assert_unchecked(a.len() >= kc);
+        core::hint::assert_unchecked(b.len() >= kc);
         core::hint::assert_unchecked(c.len() == MR);
 
         let c: &mut [[TySimd<f64, LANE>; NR_LANE]] = transmute(c);
@@ -48,6 +49,7 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
                     let b_pj = b[p][j_lane];
                     c[i][j_lane].fma_from(a_ip, b_pj);
                 }
+                core::hint::black_box(());
             }
         }
     }

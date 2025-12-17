@@ -276,7 +276,7 @@ pub fn matmul_anyway_full(
     transa: bool,
     transb: bool,
 ) {
-    MatmulLoops::<f64, 234, 512, 240, 13, 2, 8, 2360>::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc, transa, transb);
+    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8, 2360>::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc, transa, transb);
 }
 
 #[test]

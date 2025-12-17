@@ -37,6 +37,7 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
                     let b_pj = b[idx_p][j_lane];
                     c[i][j_lane].fma_from(a_ip, b_pj);
                 }
+                core::hint::black_box(());
             }
         }
     }
@@ -370,7 +371,7 @@ pub fn matmul_anyway_full_non0tab(
     tab: &[bool],
     ldtab: usize,
 ) {
-    MatmulLoops::<f64, 234, 512, 240, 13, 2, 8, 2360>::matmul_loop_macro_mb_non0tab::<3>(
+    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8, 2360>::matmul_loop_macro_mb_non0tab::<3>(
         c, a, b, m, n, k, lda, ldb, ldc, transa, transb, tab, ldtab,
     );
 }
