@@ -62,10 +62,6 @@ where
         indices_k_for_b: &[usize],
         barrier: &[Mutex<()>],
     ) {
-        if indices_k_for_b.is_empty() {
-            return;
-        }
-
         core::hint::assert_unchecked(mc <= MC);
         core::hint::assert_unchecked(nr <= NR_LANE * LANE);
         core::hint::assert_unchecked(kc <= KC);
@@ -129,8 +125,8 @@ where
         kc: usize,
         nr: usize,
         ldb: usize,
-        non0tab: &[u8],
-        nblk: usize,
+        tab: &[bool],
+        ldtab: usize,
     ) -> ([usize; KC], usize) {
         unsafe { core::hint::assert_unchecked(kc <= KC) };
         unsafe { core::hint::assert_unchecked(nr <= NR_LANE * LANE) };
@@ -139,10 +135,14 @@ where
         let mut indices_k_for_b = [0; KC];
         let mut cnt_k_for_b: usize = 0;
         for p in 0..kc {
-            if non0tab[p * nblk] != 0 {
+            if tab[p * ldtab] {
                 indices_k_for_b[cnt_k_for_b] = p;
                 cnt_k_for_b += 1;
             }
+        }
+
+        if cnt_k_for_b == 0 {
+            return (indices_k_for_b, cnt_k_for_b);
         }
 
         if nr == NR_LANE * LANE {
@@ -183,8 +183,8 @@ where
         ldc: usize,            // ldc, for write to C
         transb: bool,          // whether B is transposed
         barrier: &[Mutex<()>], // barrier for writing to C
-        non0tab: &[u8],
-        nblk: usize,
+        tab: &[bool],
+        ldtab: usize,
     ) {
         if transb {
             unimplemented!("transb=true is not implemented in matmul_loop_2nd_nr_pack_b_non0tab");
@@ -204,8 +204,10 @@ where
         for (task_j, j) in (0..nc).step_by(NR).enumerate() {
             let nr = if j + NR <= nc { NR } else { nc - j };
             let task_tab = task_j / BLKNR;
-            let (indices_k_for_b, cnt_k_for_b) =
-                Self::pack_b_no_trans_non0tab(&mut buf_b, &b[j..], kc, nr, ldb, &non0tab[task_tab..], nblk);
+            let (indices_k_for_b, cnt_k_for_b) = Self::pack_b_no_trans_non0tab(&mut buf_b, &b[j..], kc, nr, ldb, &tab[task_tab..], ldtab);
+            if cnt_k_for_b == 0 {
+                continue;
+            }
             unsafe {
                 Self::matmul_loop_1st_mr_mask_k_for_b(
                     &mut c[j..],
@@ -234,8 +236,8 @@ where
         ldc: usize,
         transa: bool,
         transb: bool,
-        non0tab: &[u8],
-        nblk: usize,
+        tab: &[bool],
+        ldtab: usize,
     ) where
         T: Send + Sync,
     {
@@ -296,7 +298,7 @@ where
             // get slices
             let b = &b[task_k * KC * ldb + task_n * NC..];
             let task_tab = (task_n * NC) / (BLKNR * NR);
-            let non0tab = &non0tab[task_tab..];
+            let non0tab = &tab[task_tab..];
 
             let mc = if (task_m + 1) * MC <= m { MC } else { m - task_m * MC };
             let nc = if (task_n + 1) * NC <= n { NC } else { n - task_n * NC };
@@ -318,7 +320,7 @@ where
                 transb,
                 barrier,
                 non0tab,
-                nblk,
+                ldtab,
             );
         });
     }
@@ -335,8 +337,8 @@ where
         ldc: usize,
         transa: bool,
         transb: bool,
-        non0tab: &[u8],
-        nblk: usize,
+        tab: &[bool],
+        ldtab: usize,
     ) where
         T: Send + Sync,
     {
@@ -348,7 +350,7 @@ where
                 false => &a[i * lda..],
             };
             let c_slc = &mut c[i * ldc..];
-            Self::matmul_loop_parallel_mnk_pack_a_non0tab::<BLKNR>(c_slc, a_slc, b, mb, n, k, lda, ldb, ldc, transa, transb, non0tab, nblk);
+            Self::matmul_loop_parallel_mnk_pack_a_non0tab::<BLKNR>(c_slc, a_slc, b, mb, n, k, lda, ldb, ldc, transa, transb, tab, ldtab);
         }
     }
 }
@@ -365,11 +367,11 @@ pub fn matmul_anyway_full_non0tab(
     ldc: usize,
     transa: bool,
     transb: bool,
-    non0tab: &[u8],
-    nblk: usize,
+    tab: &[bool],
+    ldtab: usize,
 ) {
     MatmulLoops::<f64, 234, 512, 240, 13, 2, 8, 2360>::matmul_loop_macro_mb_non0tab::<3>(
-        c, a, b, m, n, k, lda, ldb, ldc, transa, transb, non0tab, nblk,
+        c, a, b, m, n, k, lda, ldb, ldc, transa, transb, tab, ldtab,
     );
 }
 
@@ -388,14 +390,14 @@ fn test_matmul_anyway_full_mask_k_for_b() {
     // non0tab: (k, n / BLKSIZE)
     const BLKSIZE: usize = 48;
     let nblk = n.div_ceil(BLKSIZE);
-    let mod_pattern = [true, false, false, true, false, true, false, false, false, false]; // 30%
-    let non0tab: Vec<u8> = (0..k * nblk).into_par_iter().map(|i| if mod_pattern[i % 10] { 1 } else { 0 }).collect();
+    let mod_pattern = [true, false, true, false, false, true, false, false, false, false]; // 30%
+    let non0tab: Vec<bool> = (0..k * nblk).into_par_iter().map(|i| mod_pattern[i % 10]).collect();
     // set zero elements in B
     (0..k * nblk).into_par_iter().for_each(|idx| {
         let b = unsafe { cast_mut_slice(&b) };
         let p = idx / nblk;
         let blk = idx % nblk;
-        if non0tab[idx] == 0 {
+        if !non0tab[idx] {
             let j0 = blk * BLKSIZE;
             let j1 = ((blk + 1) * BLKSIZE).min(n);
             for j in j0..j1 {
