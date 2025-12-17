@@ -6,7 +6,7 @@
 #![doc = include_str!("principle-loops.md")]
 
 pub mod impl_matmul;
-pub mod impl_matmul_mask_k_for_b;
+pub mod impl_matmul_non0tab;
 pub mod naive_simd;
 pub mod prelude;
 pub mod structs;
@@ -15,4 +15,4 @@ pub mod structs;
 use crate::prelude::*;
 
 #[allow(unused_imports)]
-use impl_matmul_mask_k_for_b::MatmulMicroKernelMaskKForBAPI;
+use impl_matmul_non0tab::MatmulMicroKernelMaskKForBAPI;

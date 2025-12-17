@@ -377,9 +377,9 @@ pub fn matmul_anyway_full_non0tab(
 }
 
 #[test]
-fn test_matmul_anyway_full_mask_k_for_b() {
+fn test_matmul_anyway_full_non0tab() {
     let m: usize = 3527;
-    let n: usize = 9583;
+    let n: usize = 9483;
     let k: usize = 6581;
     let lda = k;
     let ldb = n;
@@ -411,7 +411,7 @@ fn test_matmul_anyway_full_mask_k_for_b() {
     let mut c: Vec<f64> = vec![0.0; m * ldc];
     matmul_anyway_full_non0tab(&mut c, &a, &b, m, n, k, lda, ldb, ldc, false, false, &non0tab, nblk);
     let elapsed = time.elapsed();
-    println!("Elapsed time (mask_k_for_b): {:.3?}", elapsed);
+    println!("Elapsed time (non0tab): {:.3?}", elapsed);
 
     use rstsr::prelude::*;
     let device = DeviceOpenBLAS::default();
@@ -425,6 +425,4 @@ fn test_matmul_anyway_full_mask_k_for_b() {
     let c_tsr = rt::asarray((&c, [m, n], &device));
     let diff = &c_tsr - &c_ref;
     println!("Max error: {:.6e}", diff.view().abs().max());
-
-    println!("diff\n{:10.3}", diff.view());
 }
