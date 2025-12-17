@@ -10,3 +10,9 @@ pub mod impl_matmul_mask_k_for_b;
 pub mod naive_simd;
 pub mod prelude;
 pub mod structs;
+
+#[allow(unused_imports)]
+use crate::prelude::*;
+
+#[allow(unused_imports)]
+use impl_matmul_mask_k_for_b::MatmulMicroKernelMaskKForBAPI;
