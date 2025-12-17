@@ -299,7 +299,7 @@ where
             // get slices
             let b = &b[task_k * KC * ldb + task_n * NC..];
             let task_tab = (task_n * NC) / (BLKNR * NR);
-            let non0tab = &tab[task_tab..];
+            let non0tab = &tab[task_tab + task_k * KC * ldtab..];
 
             let mc = if (task_m + 1) * MC <= m { MC } else { m - task_m * MC };
             let nc = if (task_n + 1) * NC <= n { NC } else { n - task_n * NC };
@@ -425,4 +425,6 @@ fn test_matmul_anyway_full_mask_k_for_b() {
     let c_tsr = rt::asarray((&c, [m, n], &device));
     let diff = &c_tsr - &c_ref;
     println!("Max error: {:.6e}", diff.view().abs().max());
+
+    println!("diff\n{:10.3}", diff.view());
 }
