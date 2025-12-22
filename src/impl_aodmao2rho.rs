@@ -1,5 +1,3 @@
-use std::mem::MaybeUninit;
-
 use crate::prelude::*;
 
 impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
@@ -9,11 +7,34 @@ where
     Self: MatmulMicroKernelAPI<T, KC, MR, NR_LANE, LANE>,
     Self: MatmulMicroKernelMaskKForBAPI<T, KC, MR, NR_LANE, LANE>,
 {
+    pub fn pack_dm_in_aodmao2rho(
+        dm_packed: &mut [[[T; MR]; KC]],
+        dm: &[T],
+        stride_ao: usize,
+        indices_m_for_a: &[usize],
+        indices_k_for_b: &[usize],
+    ) {
+        for (idx_p, &p) in indices_k_for_b.iter().enumerate() {
+            for (task_m, indices_mr) in indices_m_for_a.chunks(MR).enumerate() {
+                for (idx_m, m) in indices_mr.iter().enumerate() {
+                    let idx_ao = m * stride_ao + p;
+                    unsafe {
+                        core::hint::assert_unchecked(task_m < dm_packed.len());
+                        core::hint::assert_unchecked(idx_m < MR);
+                        core::hint::assert_unchecked(idx_p < KC);
+                        core::hint::assert_unchecked(idx_ao < dm.len());
+                    }
+                    dm_packed[task_m][idx_p][idx_m] = dm[m * stride_ao + p].clone();
+                }
+            }
+        }
+    }
+
     #[inline]
     #[allow(clippy::uninit_assumed_init)]
     pub unsafe fn aodmao2rho_loop_1st(
         rho: &mut [T],
-        dm: &[T],
+        dm_packed: &mut [[[T; MR]; KC]],
         ao_lhs: &[T],
         ao_rhs_packed: &[[TySimd<T, LANE>; NR_LANE]],
         gr: usize,
@@ -33,18 +54,12 @@ where
 
         let [stride_ao, stride_grid] = strides;
 
-        for indices_m_for_a_chunk in indices_m_for_a.chunks(MR) {
+        for (task_mr, indices_m_for_a_chunk) in indices_m_for_a.chunks(MR).enumerate() {
             let mr = indices_m_for_a_chunk.len();
             let kc = indices_k_for_b.len();
             // pack density matrix
-            let mut dm_packed: [[T; MR]; KC] = MaybeUninit::uninit().assume_init();
-            for (idx_p, &p) in indices_k_for_b.iter().enumerate() {
-                for (idx_m, &m) in indices_m_for_a_chunk.iter().enumerate() {
-                    dm_packed[idx_p][idx_m] = dm[m * stride_ao + p].clone();
-                }
-            }
             let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = zeroed();
-            Self::microkernel(&mut c_reg, &dm_packed, ao_rhs_packed, kc);
+            Self::microkernel(&mut c_reg, &dm_packed[task_mr], ao_rhs_packed, kc);
             for iset in 0..nset {
                 let mut rho_reg: [TySimd<T, LANE>; NR_LANE] = zeroed();
                 // perform reduce
@@ -100,6 +115,7 @@ where
         tab_lhs: &[bool],
         tab_rhs: &[bool],
         ldtab: usize,
+        dm_packed_buffer: &mut [[[T; MR]; KC]],
     ) {
         debug_assert!(BLKSIZE.is_multiple_of(NR_LANE * LANE));
         let [uc, vc, gc] = nuvg;
@@ -114,30 +130,36 @@ where
         let NR = NR_LANE * LANE;
         let BLKNR = BLKSIZE / NR;
         let mut ao_rhs_packed: [[TySimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() };
-        for (task_g, g) in (0..gc).step_by(NR).enumerate() {
-            let gr = if g + NR <= gc { NR } else { gc - g };
-            let task_tab = task_g / BLKNR;
-            // get indices and quick return
-            let (indices_v, count_v) = Self::get_indices_from_non0tab::<KC>(&tab_rhs[task_tab..], ldtab, vc);
-            let (indices_u, count_u) = Self::get_indices_from_non0tab::<MC>(&tab_lhs[task_tab..], ldtab, uc);
+        // iterate the non0tab blocks
+        for (task_gblk, g) in (0..gc).step_by(BLKSIZE).enumerate() {
+            let gblk = if g + BLKSIZE <= gc { BLKSIZE } else { gc - g };
+            let (indices_v, count_v) = Self::get_indices_from_non0tab::<KC>(&tab_rhs[task_gblk..], ldtab, vc);
+            let (indices_u, count_u) = Self::get_indices_from_non0tab::<MC>(&tab_lhs[task_gblk..], ldtab, uc);
             if count_v == 0 || count_u == 0 {
                 continue;
             }
-            // pack rhs
-            Self::pack_b_no_trans_non0tab(&mut ao_rhs_packed, &ao_rhs[g..], vc, gr, stride_grid, &indices_v[..count_v]);
-            unsafe {
-                Self::aodmao2rho_loop_1st(
-                    &mut rho[g..],
-                    dm,
-                    &ao_lhs[g..],
-                    &ao_rhs_packed,
-                    gr,
-                    &indices_u[..count_u],
-                    &indices_v[..count_v],
-                    [stride_ao, stride_grid],
-                    nset,
-                    &barrier[task_g],
-                );
+            // pack dm
+            Self::pack_dm_in_aodmao2rho(dm_packed_buffer, dm, stride_ao, &indices_u[..count_u], &indices_v[..count_v]);
+            // iterate the grid points
+            for (task_g, g) in (g..g + gblk).step_by(NR).enumerate() {
+                let gr = if g + NR <= g + gblk { NR } else { g + gblk - g };
+                // pack rhs
+                Self::pack_b_no_trans_non0tab(&mut ao_rhs_packed, &ao_rhs[g..], vc, gr, stride_grid, &indices_v[..count_v]);
+                // compute
+                unsafe {
+                    Self::aodmao2rho_loop_1st(
+                        &mut rho[g..],
+                        dm_packed_buffer,
+                        &ao_lhs[g..],
+                        &ao_rhs_packed,
+                        gr,
+                        &indices_u[..count_u],
+                        &indices_v[..count_v],
+                        [stride_ao, stride_grid],
+                        nset,
+                        &barrier[task_gblk * BLKNR + task_g],
+                    );
+                }
             }
         }
     }
@@ -162,10 +184,12 @@ where
         let ntask_uc = nao.div_ceil(MC);
         let ntask_vc = nao.div_ceil(KC);
         let ntask_gc = ngrid.div_ceil(NC);
+        let ntask_ur = MC.div_ceil(MR);
         let ntask_gr = NC.div_ceil(NR);
         let g_barrier: Vec<Mutex<()>> = (0..ntask_gc * ntask_gr).map(|_| Mutex::new(())).collect();
 
         let task_count = Mutex::new(0);
+        let dm_packed_buffer: Vec<Vec<[[T; MR]; KC]>> = (0..ntask_ur).map(|_| unsafe { uninitialized_vec(ntask_ur) }).collect();
 
         (0..ntask_uc * ntask_vc * ntask_gc).into_par_iter().for_each(|_| {
             let task_id = {
@@ -174,6 +198,7 @@ where
                 *count += 1;
                 id
             };
+            let idx_thread = rayon::current_thread_index().unwrap_or(0);
 
             let task_u = task_id % ntask_uc;
             let task_g = (task_id / ntask_uc) % ntask_gc;
@@ -197,6 +222,7 @@ where
             let tab_lhs = &tab[u_start * ldtab + task_tab..];
             let tab_rhs = &tab[v_start * ldtab + task_tab..];
             let rho = unsafe { cast_mut_slice(&rho[g_start..]) };
+            let dm_packed = unsafe { cast_mut_slice(&dm_packed_buffer[idx_thread]) };
 
             Self::aodmao2rho_loop_2nd::<BLKSIZE>(
                 rho,
@@ -210,6 +236,7 @@ where
                 tab_lhs,
                 tab_rhs,
                 ldtab,
+                dm_packed,
             );
         });
     }
