@@ -303,20 +303,32 @@ pub fn test_aodmao2rho() {
     let elapsed = time.elapsed();
     println!("Elapsed time (aodm2rho): {:.3?}", elapsed);
 
-    // use rstsr::prelude::*;
-    // let device = DeviceOpenBLAS::default();
-    // let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
-    // let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
+    use rstsr::prelude::*;
+    let device = DeviceOpenBLAS::default();
+    let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
+    let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
 
-    // let time = std::time::Instant::now();
-    // let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
-    // println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
+    let time = std::time::Instant::now();
+    let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
+    println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
 
-    // let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
-    // let rho_ref = (dm_dot_ao * ao_lhs_tsr).sum_axes(-2);
+    let time = std::time::Instant::now();
+    let rho_ref = vec![0.0f64; nset * ngrid];
+    (0..ngrid).into_par_iter().chunks(1024).for_each(|chunk| {
+        let rho_ref = unsafe { cast_mut_slice(&rho_ref) };
+        for iset in 0..nset {
+            for u in 0..nao {
+                for &j in chunk.iter() {
+                    rho_ref[iset * ngrid + j] += ao_lhs[u * ngrid + j] * dm_dot_ao.raw()[iset * nao * ngrid + u * ngrid + j];
+                }
+            }
+        }
+    });
+    println!("Elapsed time (rho from reduce reference): {:.3?}", time.elapsed());
 
-    // let rho = rt::asarray((&rho, [nset, ngrid], &device));
-    // let diff = rho.view() - rho_ref.view();
-    // let err = diff.view().abs().max();
-    // println!("Max abs error: {:.6e}", err);
+    let rho = rt::asarray((&rho, [nset, ngrid], &device));
+    let rho_ref = rt::asarray((&rho_ref, [nset, ngrid], &device));
+    let diff = rho.view() - rho_ref.view();
+    let err = diff.view().abs().max();
+    println!("Max abs error: {:.6e}", err);
 }

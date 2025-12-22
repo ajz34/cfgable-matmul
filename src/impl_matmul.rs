@@ -385,12 +385,9 @@ fn test_matmul_anyway_transa() {
 fn test_matmul_faer_full() {
     // taxol, def2-TZVP
     // nelec = 452, nbasis = 2228, grids = 968656 (can be batched by 16384)
-    // let m = 3527;
-    // let n = 9583;
-    // let k = 6581;
-    let m = 226;
-    let n = 16384;
-    let k = 2228;
+    let m = 3527;
+    let n = 9583;
+    let k = 6581;
     let lda = k;
     let ldb = n;
     let ldc = n;
