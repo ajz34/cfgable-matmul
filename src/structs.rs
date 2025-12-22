@@ -28,7 +28,7 @@ pub struct MatmulLoops<
 impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
     MatmulMicroKernelAPI<f64, KC, MR, NR_LANE, LANE> for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, LANE, MB>
 {
-    #[inline]
+    #[inline(always)]
     unsafe fn microkernel(
         c: &mut [[TySimd<f64, LANE>; NR_LANE]], // MR x NR, aligned, register
         a: &[[f64; MR]],                        // kc x MR (lda), packed-transposed, cache l2 prefetch l1
@@ -40,8 +40,6 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
         core::hint::assert_unchecked(b.len() >= kc);
         core::hint::assert_unchecked(c.len() == MR);
 
-        let c: &mut [[TySimd<f64, LANE>; NR_LANE]] = transmute(c);
-        let b: &[[TySimd<f64, LANE>; NR_LANE]] = transmute(b);
         for p in 0..kc {
             for i in 0..MR {
                 let a_ip = TySimd::splat(a[p][i]);

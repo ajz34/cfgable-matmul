@@ -5,6 +5,7 @@
 #![allow(clippy::too_many_arguments)]
 #![doc = include_str!("principle-loops.md")]
 
+pub mod impl_aodmao2rho;
 pub mod impl_matmul;
 pub mod impl_matmul_non0tab;
 pub mod naive_simd;

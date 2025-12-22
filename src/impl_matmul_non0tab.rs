@@ -17,7 +17,7 @@ where
 impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
     MatmulMicroKernelMaskKForBAPI<f64, KC, MR, NR_LANE, LANE> for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, LANE, MB>
 {
-    #[inline]
+    #[inline(always)]
     unsafe fn microkernel_mask_k_for_b(
         c: &mut [[TySimd<f64, LANE>; NR_LANE]],
         a: &[[f64; MR]],
@@ -27,8 +27,6 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
         core::hint::assert_unchecked(indices_k_for_b.len() <= b.len());
         core::hint::assert_unchecked(c.len() == MR);
 
-        let c: &mut [[TySimd<f64, LANE>; NR_LANE]] = transmute(c);
-        let b: &[[TySimd<f64, LANE>; NR_LANE]] = transmute(b);
         for (idx_p, &p) in indices_k_for_b.iter().enumerate() {
             core::hint::assert_unchecked(p < a.len());
             for i in 0..MR {
@@ -58,14 +56,12 @@ where
         b: &[[TySimd<T, LANE>; NR_LANE]],
         mc: usize,
         nr: usize,
-        kc: usize,
         ldc: usize,
         indices_k_for_b: &[usize],
         barrier: &[Mutex<()>],
     ) {
         core::hint::assert_unchecked(mc <= MC);
         core::hint::assert_unchecked(nr <= NR_LANE * LANE);
-        core::hint::assert_unchecked(kc <= KC);
         core::hint::assert_unchecked(indices_k_for_b.len() <= KC);
 
         for (task_i, i) in (0..mc).step_by(MR).enumerate() {
@@ -120,34 +116,28 @@ where
     }
 
     #[inline]
-    pub fn pack_b_no_trans_non0tab(
-        dst: &mut [[TySimd<T, LANE>; NR_LANE]],
-        src: &[T],
-        kc: usize,
-        nr: usize,
-        ldb: usize,
-        tab: &[bool],
-        ldtab: usize,
-    ) -> ([usize; KC], usize) {
-        unsafe { core::hint::assert_unchecked(kc <= KC) };
-        unsafe { core::hint::assert_unchecked(nr <= NR_LANE * LANE) };
-
-        // generate indices_k_for_b
-        let mut indices_k_for_b = [0; KC];
-        let mut cnt_k_for_b: usize = 0;
-        for p in 0..kc {
+    pub fn get_indices_from_non0tab<const NSTACK: usize>(tab: &[bool], ldtab: usize, k: usize) -> ([usize; NSTACK], usize) {
+        let mut indices = [0; NSTACK];
+        let mut count: usize = 0;
+        for p in 0..k {
             if tab[p * ldtab] {
-                indices_k_for_b[cnt_k_for_b] = p;
-                cnt_k_for_b += 1;
+                indices[count] = p;
+                count += 1;
             }
         }
+        (indices, count)
+    }
 
-        if cnt_k_for_b == 0 {
-            return (indices_k_for_b, cnt_k_for_b);
+    #[inline]
+    pub fn pack_b_no_trans_non0tab(dst: &mut [[TySimd<T, LANE>; NR_LANE]], src: &[T], kc: usize, nr: usize, ldb: usize, indices: &[usize]) {
+        unsafe { core::hint::assert_unchecked(kc <= KC) };
+        unsafe { core::hint::assert_unchecked(nr <= NR_LANE * LANE) };
+        if indices.is_empty() {
+            return;
         }
 
         if nr == NR_LANE * LANE {
-            for (idx_p, &p) in indices_k_for_b[..cnt_k_for_b].iter().enumerate() {
+            for (idx_p, &p) in indices.iter().enumerate() {
                 unsafe { core::hint::assert_unchecked(idx_p < kc) };
                 unsafe { core::hint::assert_unchecked(p < kc) };
                 let src_ptr = unsafe { src.as_ptr().add(p * ldb) };
@@ -157,7 +147,7 @@ where
             }
         } else {
             // avoid out-of-bound access
-            for (idx_p, &p) in indices_k_for_b[..cnt_k_for_b].iter().enumerate() {
+            for (idx_p, &p) in indices.iter().enumerate() {
                 unsafe { core::hint::assert_unchecked(idx_p < kc) };
                 unsafe { core::hint::assert_unchecked(p < kc) };
                 for jj in 0..nr {
@@ -168,8 +158,6 @@ where
                 }
             }
         }
-
-        (indices_k_for_b, cnt_k_for_b)
     }
 
     #[inline]
@@ -205,22 +193,13 @@ where
         for (task_j, j) in (0..nc).step_by(NR).enumerate() {
             let nr = if j + NR <= nc { NR } else { nc - j };
             let task_tab = task_j / BLKNR;
-            let (indices_k_for_b, cnt_k_for_b) = Self::pack_b_no_trans_non0tab(&mut buf_b, &b[j..], kc, nr, ldb, &tab[task_tab..], ldtab);
-            if cnt_k_for_b == 0 {
+            let (indices, count) = Self::get_indices_from_non0tab::<KC>(&tab[task_tab..], ldtab, kc);
+            if count == 0 {
                 continue;
             }
+            Self::pack_b_no_trans_non0tab(&mut buf_b, &b[j..], kc, nr, ldb, &indices[..count]);
             unsafe {
-                Self::matmul_loop_1st_mr_mask_k_for_b(
-                    &mut c[j..],
-                    a,
-                    &buf_b,
-                    mc,
-                    nr,
-                    kc,
-                    ldc,
-                    &indices_k_for_b[..cnt_k_for_b],
-                    &barrier[task_j * ntask_mr..],
-                )
+                Self::matmul_loop_1st_mr_mask_k_for_b(&mut c[j..], a, &buf_b, mc, nr, ldc, &indices[..count], &barrier[task_j * ntask_mr..])
             };
         }
     }
@@ -378,9 +357,9 @@ pub fn matmul_anyway_full_non0tab(
 
 #[test]
 fn test_matmul_anyway_full_non0tab() {
-    let m: usize = 3527;
-    let n: usize = 9483;
-    let k: usize = 6581;
+    let m: usize = 2228;
+    let n: usize = 16384;
+    let k: usize = 2228;
     let lda = k;
     let ldb = n;
     let ldc = n;

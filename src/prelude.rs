@@ -1,10 +1,14 @@
 pub use crate::structs::*;
 
 pub(crate) use crate::naive_simd::*;
-pub(crate) use core::mem::{transmute, zeroed};
+pub(crate) use core::mem::zeroed;
 pub(crate) use core::ops::*;
+pub(crate) use num::traits::MulAdd;
 pub(crate) use rayon::prelude::*;
 pub(crate) use std::sync::Mutex;
+
+#[allow(unused_imports)]
+pub(crate) use crate::impl_matmul_non0tab::MatmulMicroKernelMaskKForBAPI;
 
 #[inline]
 #[allow(clippy::uninit_vec)]
