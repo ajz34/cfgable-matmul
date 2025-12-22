@@ -32,7 +32,7 @@ where
     #[allow(clippy::uninit_assumed_init)]
     pub unsafe fn aodmao2rho_loop_1st(
         rho: &mut [T],
-        dm_packed: &mut [[[T; MR]; KC]],
+        dm_packed: &mut [Vec<[[T; MR]; KC]>],
         ao_lhs_packed: &[[TySimd<T, LANE>; NR_LANE]],
         ao_rhs_packed: &[[TySimd<T, LANE>; NR_LANE]],
         gr: usize,
@@ -55,9 +55,9 @@ where
         for (task_mr, m_start) in (0..mc).step_by(MR).enumerate() {
             let mr = if m_start + MR <= mc { MR } else { mc - m_start };
             // pack density matrix
-            let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = zeroed();
-            Self::microkernel(&mut c_reg, &dm_packed[task_mr], ao_rhs_packed, vc);
             for iset in 0..nset {
+                let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = zeroed();
+                Self::microkernel(&mut c_reg, &dm_packed[iset][task_mr], ao_rhs_packed, vc);
                 let mut rho_reg: [TySimd<T, LANE>; NR_LANE] = zeroed();
                 // perform reduce
                 for m in 0..mr {
@@ -80,7 +80,7 @@ where
                         let j_lane = j / LANE;
                         let j_offset = j % LANE;
                         let idx_rho = iset * stride_grid + j;
-                        rho[idx_rho] += rho_reg[j_lane][j_offset].clone();
+                        rho[idx_rho] = rho_reg[j_lane][j_offset].clone();
                     }
                 }
                 drop(lock);
@@ -89,8 +89,8 @@ where
     }
 
     pub fn aodmao2rho_loop_2nd<const BLKSIZE: usize>(
-        rho: &mut [T],
-        dm: &[T],
+        rhos: &mut [T],
+        dms: &[T],
         ao_lhs: &[T],
         ao_rhs: &[T],
         strides: [usize; 2],
@@ -100,7 +100,7 @@ where
         tab_lhs: &[bool],
         tab_rhs: &[bool],
         ldtab: usize,
-        dm_packed_buffer: &mut [[[T; MR]; KC]],
+        dm_packed_buffer: &mut [Vec<[[T; MR]; KC]>],
     ) {
         debug_assert!(BLKSIZE.is_multiple_of(NR_LANE * LANE));
         let [uc, vc, gc] = nuvg;
@@ -125,7 +125,17 @@ where
                 continue;
             }
             // pack dm
-            unsafe { Self::pack_dm_in_aodmao2rho(dm_packed_buffer, dm, stride_ao, &indices_u[..count_u], &indices_v[..count_v]) };
+            for iset in 0..nset {
+                unsafe {
+                    Self::pack_dm_in_aodmao2rho(
+                        &mut dm_packed_buffer[iset],
+                        &dms[iset * stride_ao * stride_ao..],
+                        stride_ao,
+                        &indices_u[..count_u],
+                        &indices_v[..count_v],
+                    )
+                };
+            }
             // iterate the grid points
             for (task_g, g) in (g..g + gblk).step_by(NR).enumerate() {
                 let gr = if g + NR <= g + gblk { NR } else { g + gblk - g };
@@ -136,7 +146,7 @@ where
                 // compute
                 unsafe {
                     Self::aodmao2rho_loop_1st(
-                        &mut rho[g..],
+                        &mut rhos[g..],
                         dm_packed_buffer,
                         &ao_lhs_packed,
                         &ao_rhs_packed,
@@ -153,19 +163,20 @@ where
     }
 
     pub fn aodmao2rho_loop_parallel<const BLKSIZE: usize>(
-        rho: &mut [T],
-        dm: &[T],
+        rhos: &mut [T],
+        dms: &[T],
         ao_lhs: &[T],
         ao_rhs: &[T],
         strides: [usize; 2],
-        shape: [usize; 3],
+        shape: [usize; 2],
+        nset: usize,
         tab: &[bool],
         ldtab: usize,
     ) where
         T: Send + Sync,
     {
         let [stride_ao, stride_grid] = strides;
-        let [nset, nao, ngrid] = shape;
+        let [nao, ngrid] = shape;
 
         let NR = NR_LANE * LANE;
         assert!(NC.is_multiple_of(BLKSIZE));
@@ -176,9 +187,11 @@ where
         let ntask_gr = NC.div_ceil(NR);
         let g_barrier: Vec<Mutex<()>> = (0..ntask_gc * ntask_gr).map(|_| Mutex::new(())).collect();
 
-        let task_count = Mutex::new(0);
-        let dm_packed_buffer: Vec<Vec<[[T; MR]; KC]>> = (0..ntask_ur).map(|_| unsafe { uninitialized_vec(ntask_ur) }).collect();
+        let nthreads = rayon::current_num_threads();
+        let dm_packed_buffer: Vec<Vec<Vec<[[T; MR]; KC]>>> =
+            (0..nthreads).map(|_| (0..nset).map(|_| unsafe { uninitialized_vec(ntask_ur) }).collect()).collect();
 
+        let task_count = Mutex::new(0);
         (0..ntask_uc * ntask_vc * ntask_gc).into_par_iter().for_each(|_| {
             let task_id = {
                 let mut count = task_count.lock().unwrap();
@@ -206,10 +219,10 @@ where
 
             let ao_lhs = &ao_lhs[u_start * stride_grid + g_start..];
             let ao_rhs = &ao_rhs[v_start * stride_grid + g_start..];
-            let dm = &dm[u_start * stride_ao + v_start..];
+            let dm = &dms[u_start * stride_ao + v_start..];
             let tab_lhs = &tab[u_start * ldtab + task_tab..];
             let tab_rhs = &tab[v_start * ldtab + task_tab..];
-            let rho = unsafe { cast_mut_slice(&rho[g_start..]) };
+            let rho = unsafe { cast_mut_slice(&rhos[g_start..]) };
             let dm_packed = unsafe { cast_mut_slice(&dm_packed_buffer[idx_thread]) };
 
             Self::aodmao2rho_loop_2nd::<BLKSIZE>(
@@ -231,26 +244,30 @@ where
 }
 
 pub fn aodmao2rho_anyway(
-    rho: &mut [f64],
-    dm: &[f64],
+    rhos: &mut [f64],
+    dms: &[f64],
     ao_lhs: &[f64],
     ao_rhs: &[f64],
     strides: [usize; 2],
-    shape: [usize; 3],
+    shape: [usize; 2],
+    nset: usize,
     tab: &[bool],
     ldtab: usize,
 ) {
-    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8>::aodmao2rho_loop_parallel::<48>(rho, dm, ao_lhs, ao_rhs, strides, shape, tab, ldtab);
+    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8>::aodmao2rho_loop_parallel::<48>(
+        rhos, dms, ao_lhs, ao_rhs, strides, shape, nset, tab, ldtab,
+    );
 }
 
 #[test]
 pub fn test_aodmao2rho() {
     let nao: usize = 2228;
     let ngrid: usize = 16384;
+    let nset: usize = 3;
 
     let ao_lhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).sin()).collect();
     let ao_rhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).cos()).collect();
-    let dm: Vec<f64> = (0..nao * nao).map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
+    let dm: Vec<f64> = (0..nset * nao * nao).map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
 
     // special treatment for zeroing
     // non0tab: (k, n / BLKSIZE)
@@ -275,41 +292,25 @@ pub fn test_aodmao2rho() {
     });
 
     let time = std::time::Instant::now();
-    let mut rho = vec![0.0f64; ngrid];
-    aodmao2rho_anyway(&mut rho, &dm, &ao_lhs, &ao_rhs, [nao, ngrid], [1, nao, ngrid], &non0tab, nblk);
+    let mut rho = vec![0.0f64; nset * ngrid];
+    aodmao2rho_anyway(&mut rho, &dm, &ao_lhs, &ao_rhs, [nao, ngrid], [nao, ngrid], nset, &non0tab, nblk);
     let elapsed = time.elapsed();
     println!("Elapsed time (aodm2rho): {:.3?}", elapsed);
 
     use rstsr::prelude::*;
     let device = DeviceOpenBLAS::default();
     let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
-    let dm_tsr = rt::asarray((&dm, [nao, nao], &device));
+    let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
 
     let time = std::time::Instant::now();
-    let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nao, ngrid)
+    let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
     println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
 
-    let time = std::time::Instant::now();
-    let rho_ref = (0..ngrid)
-        .into_par_iter()
-        .map(|g| {
-            let mut sum = 0.0;
-            for p in 0..nao {
-                sum += ao_lhs[p * ngrid + g] * dm_dot_ao.raw()[p * ngrid + g];
-            }
-            sum
-        })
-        .collect::<Vec<f64>>();
-    println!("Elapsed time (ao_to_rho reference): {:.3?}", time.elapsed());
-
-    println!("rho     {:10.3?}", &rho[..10.min(ngrid)]);
-    println!("rho_ref {:10.3?}", &rho_ref[..10.min(ngrid)]);
-
     let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
-    let rho_ref = (dm_dot_ao * ao_lhs_tsr).sum_axes(0);
-    println!("rho_ref (rstsr) {:10.3?}", &rho_ref.raw()[..10.min(ngrid)]);
+    let rho_ref = (dm_dot_ao * ao_lhs_tsr).sum_axes(-2);
 
-    let diff = rt::asarray((&rho, &device)) - rho_ref.view();
+    let rho = rt::asarray((&rho, [nset, ngrid], &device));
+    let diff = rho.view() - rho_ref.view();
     let err = diff.view().abs().max();
     println!("Max abs error: {:.6e}", err);
 }
