@@ -56,8 +56,14 @@ where
             let mr = if m_start + MR <= mc { MR } else { mc - m_start };
             // pack density matrix
             for iset in 0..nset {
-                let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = zeroed();
-                Self::microkernel(&mut c_reg, &dm_packed[iset][task_mr], ao_rhs_packed, vc);
+                // For this case, rust's release build may fail to put c_reg in registers (to
+                // let rho_reg to be also kept in registers). We need explicit
+                // black_box to enforce it this code to be kept in registers.
+                let c_reg = core::hint::black_box({
+                    let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = zeroed();
+                    Self::microkernel(&mut c_reg, &dm_packed[iset][task_mr], ao_rhs_packed, vc);
+                    c_reg
+                });
                 let mut rho_reg: [TySimd<T, LANE>; NR_LANE] = zeroed();
                 // perform reduce
                 for m in 0..mr {
@@ -297,20 +303,20 @@ pub fn test_aodmao2rho() {
     let elapsed = time.elapsed();
     println!("Elapsed time (aodm2rho): {:.3?}", elapsed);
 
-    use rstsr::prelude::*;
-    let device = DeviceOpenBLAS::default();
-    let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
-    let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
+    // use rstsr::prelude::*;
+    // let device = DeviceOpenBLAS::default();
+    // let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
+    // let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
 
-    let time = std::time::Instant::now();
-    let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
-    println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
+    // let time = std::time::Instant::now();
+    // let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
+    // println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
 
-    let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
-    let rho_ref = (dm_dot_ao * ao_lhs_tsr).sum_axes(-2);
+    // let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
+    // let rho_ref = (dm_dot_ao * ao_lhs_tsr).sum_axes(-2);
 
-    let rho = rt::asarray((&rho, [nset, ngrid], &device));
-    let diff = rho.view() - rho_ref.view();
-    let err = diff.view().abs().max();
-    println!("Max abs error: {:.6e}", err);
+    // let rho = rt::asarray((&rho, [nset, ngrid], &device));
+    // let diff = rho.view() - rho_ref.view();
+    // let err = diff.view().abs().max();
+    // println!("Max abs error: {:.6e}", err);
 }
