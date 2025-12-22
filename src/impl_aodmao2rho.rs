@@ -88,7 +88,7 @@ where
         }
     }
 
-    pub fn aodmao2rho_loop_2nd<const BLKNR: usize>(
+    pub fn aodmao2rho_loop_2nd<const BLKSIZE: usize>(
         rho: &mut [T],
         dm: &[T],
         ao_lhs: &[T],
@@ -101,6 +101,7 @@ where
         tab_rhs: &[bool],
         ldtab: usize,
     ) {
+        debug_assert!(BLKSIZE.is_multiple_of(NR_LANE * LANE));
         let [uc, vc, gc] = nuvg;
         let [stride_ao, stride_grid] = strides;
 
@@ -111,6 +112,7 @@ where
         }
 
         let NR = NR_LANE * LANE;
+        let BLKNR = BLKSIZE / NR;
         let mut ao_rhs_packed: [[TySimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() };
         for (task_g, g) in (0..gc).step_by(NR).enumerate() {
             let gr = if g + NR <= gc { NR } else { gc - g };
@@ -140,7 +142,7 @@ where
         }
     }
 
-    pub fn aodmao2rho_loop_parallel<const BLKNR: usize>(
+    pub fn aodmao2rho_loop_parallel<const BLKSIZE: usize>(
         rho: &mut [T],
         dm: &[T],
         ao_lhs: &[T],
@@ -156,7 +158,6 @@ where
         let [nset, nao, ngrid] = shape;
 
         let NR = NR_LANE * LANE;
-        let BLKSIZE = BLKNR * NR;
         assert!(NC.is_multiple_of(BLKSIZE));
         let ntask_uc = nao.div_ceil(MC);
         let ntask_vc = nao.div_ceil(KC);
@@ -197,7 +198,7 @@ where
             let tab_rhs = &tab[v_start * ldtab + task_tab..];
             let rho = unsafe { cast_mut_slice(&rho[g_start..]) };
 
-            Self::aodmao2rho_loop_2nd::<BLKNR>(
+            Self::aodmao2rho_loop_2nd::<BLKSIZE>(
                 rho,
                 dm,
                 ao_lhs,
@@ -224,7 +225,7 @@ pub fn aodmao2rho_anyway(
     tab: &[bool],
     ldtab: usize,
 ) {
-    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8>::aodmao2rho_loop_parallel::<3>(rho, dm, ao_lhs, ao_rhs, strides, shape, tab, ldtab);
+    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8>::aodmao2rho_loop_parallel::<48>(rho, dm, ao_lhs, ao_rhs, strides, shape, tab, ldtab);
 }
 
 #[test]
@@ -264,36 +265,36 @@ pub fn test_aodmao2rho() {
     let elapsed = time.elapsed();
     println!("Elapsed time (aodm2rho): {:.3?}", elapsed);
 
-    // use rstsr::prelude::*;
-    // let device = DeviceOpenBLAS::default();
-    // let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
-    // let dm_tsr = rt::asarray((&dm, [nao, nao], &device));
+    use rstsr::prelude::*;
+    let device = DeviceOpenBLAS::default();
+    let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
+    let dm_tsr = rt::asarray((&dm, [nao, nao], &device));
 
-    // let time = std::time::Instant::now();
-    // let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nao, ngrid)
-    // println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
+    let time = std::time::Instant::now();
+    let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nao, ngrid)
+    println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
 
-    // let time = std::time::Instant::now();
-    // let rho_ref = (0..ngrid)
-    //     .into_par_iter()
-    //     .map(|g| {
-    //         let mut sum = 0.0;
-    //         for p in 0..nao {
-    //             sum += ao_lhs[p * ngrid + g] * dm_dot_ao.raw()[p * ngrid +
-    // g];         }
-    //         sum
-    //     })
-    //     .collect::<Vec<f64>>();
-    // println!("Elapsed time (ao_to_rho reference): {:.3?}", time.elapsed());
+    let time = std::time::Instant::now();
+    let rho_ref = (0..ngrid)
+        .into_par_iter()
+        .map(|g| {
+            let mut sum = 0.0;
+            for p in 0..nao {
+                sum += ao_lhs[p * ngrid + g] * dm_dot_ao.raw()[p * ngrid + g];
+            }
+            sum
+        })
+        .collect::<Vec<f64>>();
+    println!("Elapsed time (ao_to_rho reference): {:.3?}", time.elapsed());
 
-    // println!("rho     {:10.3?}", &rho[..10.min(ngrid)]);
-    // println!("rho_ref {:10.3?}", &rho_ref[..10.min(ngrid)]);
+    println!("rho     {:10.3?}", &rho[..10.min(ngrid)]);
+    println!("rho_ref {:10.3?}", &rho_ref[..10.min(ngrid)]);
 
-    // let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
-    // let rho_ref = (dm_dot_ao * ao_lhs_tsr).sum_axes(0);
-    // println!("rho_ref (rstsr) {:10.3?}", &rho_ref.raw()[..10.min(ngrid)]);
+    let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
+    let rho_ref = (dm_dot_ao * ao_lhs_tsr).sum_axes(0);
+    println!("rho_ref (rstsr) {:10.3?}", &rho_ref.raw()[..10.min(ngrid)]);
 
-    // let diff = rt::asarray((&rho, &device)) - rho_ref.view();
-    // let err = diff.view().abs().max();
-    // println!("Max abs error: {:.6e}", err);
+    let diff = rt::asarray((&rho, &device)) - rho_ref.view();
+    let err = diff.view().abs().max();
+    println!("Max abs error: {:.6e}", err);
 }

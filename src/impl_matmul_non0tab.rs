@@ -161,7 +161,7 @@ where
     }
 
     #[inline]
-    pub fn matmul_loop_2nd_nr_pack_b_non0tab<const BLKNR: usize>(
+    pub fn matmul_loop_2nd_nr_pack_b_non0tab<const BLKSIZE: usize>(
         c: &mut [T],           // MC x NC (ldc), DRAM
         a: &[[[T; MR]; KC]],   // KC x MC (lda), packed-transposed, cache l2
         b: &[T],               // KC x NC, aligned, cache l3 with parallel
@@ -175,6 +175,9 @@ where
         tab: &[bool],
         ldtab: usize,
     ) {
+        debug_assert!(BLKSIZE.is_multiple_of(NR_LANE * LANE));
+        let BLKNR = BLKSIZE / (NR_LANE * LANE);
+
         if transb {
             unimplemented!("transb=true is not implemented in matmul_loop_2nd_nr_pack_b_non0tab");
         }
@@ -204,7 +207,7 @@ where
         }
     }
 
-    pub fn matmul_loop_parallel_mnk_pack_a_non0tab<const BLKNR: usize>(
+    pub fn matmul_loop_parallel_mnk_pack_a_non0tab<const BLKSIZE: usize>(
         c: &mut [T],
         a: &[T],
         b: &[T],
@@ -221,6 +224,7 @@ where
     ) where
         T: Send + Sync,
     {
+        debug_assert!(BLKSIZE.is_multiple_of(NR_LANE * LANE));
         if transb {
             unimplemented!("transb=true is not implemented in matmul_loop_parallel_mnk_pack_a_mask_for_b");
         }
@@ -277,7 +281,7 @@ where
 
             // get slices
             let b = &b[task_k * KC * ldb + task_n * NC..];
-            let task_tab = (task_n * NC) / (BLKNR * NR);
+            let task_tab = (task_n * NC) / BLKSIZE;
             let non0tab = &tab[task_tab + task_k * KC * ldtab..];
 
             let mc = if (task_m + 1) * MC <= m { MC } else { m - task_m * MC };
@@ -288,7 +292,7 @@ where
             let barrier = &c_barrier[(task_m * ntask_nc + task_n) * (ntask_nr * ntask_mr)..];
             let c_mc_nc = unsafe { cast_mut_slice(&c[task_m * MC * ldc + task_n * NC..]) };
 
-            Self::matmul_loop_2nd_nr_pack_b_non0tab::<BLKNR>(
+            Self::matmul_loop_2nd_nr_pack_b_non0tab::<BLKSIZE>(
                 c_mc_nc,
                 a_pack_mc_kc,
                 b,
@@ -305,7 +309,7 @@ where
         });
     }
 
-    pub fn matmul_loop_macro_mb_non0tab<const BLKNR: usize>(
+    pub fn matmul_loop_macro_mb_non0tab<const BLKSIZE: usize>(
         c: &mut [T],
         a: &[T],
         b: &[T],
@@ -330,7 +334,7 @@ where
                 false => &a[i * lda..],
             };
             let c_slc = &mut c[i * ldc..];
-            Self::matmul_loop_parallel_mnk_pack_a_non0tab::<BLKNR>(c_slc, a_slc, b, mb, n, k, lda, ldb, ldc, transa, transb, tab, ldtab);
+            Self::matmul_loop_parallel_mnk_pack_a_non0tab::<BLKSIZE>(c_slc, a_slc, b, mb, n, k, lda, ldb, ldc, transa, transb, tab, ldtab);
         }
     }
 }
@@ -350,7 +354,7 @@ pub fn matmul_anyway_full_non0tab(
     tab: &[bool],
     ldtab: usize,
 ) {
-    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8, 2360>::matmul_loop_macro_mb_non0tab::<3>(
+    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8, 2360>::matmul_loop_macro_mb_non0tab::<48>(
         c, a, b, m, n, k, lda, ldb, ldc, transa, transb, tab, ldtab,
     );
 }
