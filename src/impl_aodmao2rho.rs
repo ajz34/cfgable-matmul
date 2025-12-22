@@ -7,24 +7,22 @@ where
     Self: MatmulMicroKernelAPI<T, KC, MR, NR_LANE, LANE>,
     Self: MatmulMicroKernelMaskKForBAPI<T, KC, MR, NR_LANE, LANE>,
 {
-    pub fn pack_dm_in_aodmao2rho(
+    pub unsafe fn pack_dm_in_aodmao2rho(
         dm_packed: &mut [[[T; MR]; KC]],
         dm: &[T],
         stride_ao: usize,
         indices_m_for_a: &[usize],
         indices_k_for_b: &[usize],
     ) {
+        core::hint::assert_unchecked(indices_m_for_a.len() <= MC);
+        core::hint::assert_unchecked(indices_k_for_b.len() <= KC);
+
         for (idx_p, &p) in indices_k_for_b.iter().enumerate() {
             for (task_m, indices_mr) in indices_m_for_a.chunks(MR).enumerate() {
                 for (idx_m, m) in indices_mr.iter().enumerate() {
                     let idx_ao = m * stride_ao + p;
-                    unsafe {
-                        core::hint::assert_unchecked(task_m < dm_packed.len());
-                        core::hint::assert_unchecked(idx_m < MR);
-                        core::hint::assert_unchecked(idx_p < KC);
-                        core::hint::assert_unchecked(idx_ao < dm.len());
-                    }
-                    dm_packed[task_m][idx_p][idx_m] = dm[m * stride_ao + p].clone();
+                    core::hint::assert_unchecked(task_m < dm_packed.len());
+                    dm_packed[task_m][idx_p][idx_m] = (*dm.get_unchecked(idx_ao)).clone();
                 }
             }
         }
@@ -35,51 +33,38 @@ where
     pub unsafe fn aodmao2rho_loop_1st(
         rho: &mut [T],
         dm_packed: &mut [[[T; MR]; KC]],
-        ao_lhs: &[T],
+        ao_lhs_packed: &[[TySimd<T, LANE>; NR_LANE]],
         ao_rhs_packed: &[[TySimd<T, LANE>; NR_LANE]],
         gr: usize,
-        indices_m_for_a: &[usize],
-        indices_k_for_b: &[usize],
+        mc: usize,
+        vc: usize,
         strides: [usize; 2],
         nset: usize,
         barrier: &Mutex<()>,
     ) {
         core::hint::assert_unchecked(gr <= NR_LANE * LANE);
-        core::hint::assert_unchecked(indices_m_for_a.len() <= MC);
-        core::hint::assert_unchecked(indices_k_for_b.len() <= KC);
+        core::hint::assert_unchecked(mc <= MC);
+        core::hint::assert_unchecked(vc <= KC);
 
-        if indices_m_for_a.is_empty() || indices_k_for_b.is_empty() {
+        if mc == 0 || vc == 0 {
             return;
         }
 
-        let [stride_ao, stride_grid] = strides;
+        let [_, stride_grid] = strides;
 
-        for (task_mr, indices_m_for_a_chunk) in indices_m_for_a.chunks(MR).enumerate() {
-            let mr = indices_m_for_a_chunk.len();
-            let kc = indices_k_for_b.len();
+        for (task_mr, m_start) in (0..mc).step_by(MR).enumerate() {
+            let mr = if m_start + MR <= mc { MR } else { mc - m_start };
             // pack density matrix
             let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = zeroed();
-            Self::microkernel(&mut c_reg, &dm_packed[task_mr], ao_rhs_packed, kc);
+            Self::microkernel(&mut c_reg, &dm_packed[task_mr], ao_rhs_packed, vc);
             for iset in 0..nset {
                 let mut rho_reg: [TySimd<T, LANE>; NR_LANE] = zeroed();
                 // perform reduce
-                if gr == NR_LANE * LANE {
-                    for m in 0..mr {
-                        for j_lane in 0..NR_LANE {
-                            let ao_lhs_lane = TySimd::loadu_ptr(
-                                &ao_lhs[iset * stride_ao * stride_grid + indices_m_for_a_chunk[m] * stride_grid + j_lane * LANE],
-                            );
-                            rho_reg[j_lane].fma_from(c_reg[m][j_lane].clone(), ao_lhs_lane);
-                        }
-                    }
-                } else {
-                    for m in 0..mr {
-                        for j_lane in 0..gr.div_ceil(LANE) {
-                            let ao_lhs_lane = TySimd::loadu_ptr(
-                                &ao_lhs[iset * stride_ao * stride_grid + indices_m_for_a_chunk[m] * stride_grid + j_lane * LANE],
-                            );
-                            rho_reg[j_lane].fma_from(c_reg[m][j_lane].clone(), ao_lhs_lane);
-                        }
+                for m in 0..mr {
+                    for j_lane in 0..NR_LANE {
+                        assert!(m_start + m < ao_lhs_packed.len());
+                        let ao_lhs_lane = ao_lhs_packed[m_start + m][j_lane].clone();
+                        rho_reg[j_lane].fma_from(c_reg[m][j_lane].clone(), ao_lhs_lane);
                     }
                 }
                 // load and store rho
@@ -129,6 +114,7 @@ where
 
         let NR = NR_LANE * LANE;
         let BLKNR = BLKSIZE / NR;
+        let mut ao_lhs_packed: [[TySimd<T, LANE>; NR_LANE]; MC] = unsafe { zeroed() };
         let mut ao_rhs_packed: [[TySimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() };
         // iterate the non0tab blocks
         for (task_gblk, g) in (0..gc).step_by(BLKSIZE).enumerate() {
@@ -139,22 +125,24 @@ where
                 continue;
             }
             // pack dm
-            Self::pack_dm_in_aodmao2rho(dm_packed_buffer, dm, stride_ao, &indices_u[..count_u], &indices_v[..count_v]);
+            unsafe { Self::pack_dm_in_aodmao2rho(dm_packed_buffer, dm, stride_ao, &indices_u[..count_u], &indices_v[..count_v]) };
             // iterate the grid points
             for (task_g, g) in (g..g + gblk).step_by(NR).enumerate() {
                 let gr = if g + NR <= g + gblk { NR } else { g + gblk - g };
                 // pack rhs
                 Self::pack_b_no_trans_non0tab(&mut ao_rhs_packed, &ao_rhs[g..], vc, gr, stride_grid, &indices_v[..count_v]);
+                // pack lhs
+                Self::pack_b_no_trans_non0tab(&mut ao_lhs_packed, &ao_lhs[g..], uc, gr, stride_grid, &indices_u[..count_u]);
                 // compute
                 unsafe {
                     Self::aodmao2rho_loop_1st(
                         &mut rho[g..],
                         dm_packed_buffer,
-                        &ao_lhs[g..],
+                        &ao_lhs_packed,
                         &ao_rhs_packed,
                         gr,
-                        &indices_u[..count_u],
-                        &indices_v[..count_v],
+                        count_u,
+                        count_v,
                         [stride_ao, stride_grid],
                         nset,
                         &barrier[task_gblk * BLKNR + task_g],
