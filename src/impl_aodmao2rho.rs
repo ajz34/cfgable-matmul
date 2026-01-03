@@ -268,8 +268,8 @@ pub fn aodmao2rho_anyway(
 #[test]
 pub fn test_aodmao2rho() {
     let nao: usize = 2228;
-    let ngrid: usize = 16384;
-    let nset: usize = 3;
+    let ngrid: usize = 131072;
+    let nset: usize = 1;
 
     let ao_lhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).sin()).collect();
     let ao_rhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).cos()).collect();
@@ -279,8 +279,11 @@ pub fn test_aodmao2rho() {
     // non0tab: (k, n / BLKSIZE)
     const BLKSIZE: usize = 48;
     let nblk = ngrid.div_ceil(BLKSIZE);
-    let mod_pattern = [true, false, true, false, false, true, false, false, false, false]; // 30%
-    let non0tab: Vec<bool> = (0..nao * nblk).into_par_iter().map(|i| mod_pattern[i % 10]).collect();
+    let mod_pattern = [
+        true, false, true, false, false, false, false, false, false, false, false, true, true, false, false, false, false, false, true,
+        false,
+    ]; // 25%
+    let non0tab: Vec<bool> = (0..nao * nblk).into_par_iter().map(|i| mod_pattern[i % 20]).collect();
     // set zero elements in B
     (0..nao * nblk).into_par_iter().for_each(|idx| {
         let ao_lhs = unsafe { cast_mut_slice(&ao_lhs) };
@@ -305,12 +308,21 @@ pub fn test_aodmao2rho() {
 
     use rstsr::prelude::*;
     let device = DeviceOpenBLAS::default();
+    let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
     let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
     let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
 
     let time = std::time::Instant::now();
     let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
     println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
+
+    let time = std::time::Instant::now();
+    let tmp_mul = &ao_lhs_tsr * &dm_dot_ao; // (nset, nao, ngrid)
+    println!("Elapsed time (ao_lhs * dm_dot_ao): {:.3?}", time.elapsed());
+
+    let time = std::time::Instant::now();
+    let rho_ref_reduce = tmp_mul.sum_axes(-2); // (nset, ngrid)
+    println!("Elapsed time (rho from rstsr reduce): {:.3?}", time.elapsed());
 
     let time = std::time::Instant::now();
     let rho_ref = vec![0.0f64; nset * ngrid];
@@ -329,6 +341,90 @@ pub fn test_aodmao2rho() {
     let rho = rt::asarray((&rho, [nset, ngrid], &device));
     let rho_ref = rt::asarray((&rho_ref, [nset, ngrid], &device));
     let diff = rho.view() - rho_ref.view();
+    let err = diff.view().abs().max();
+    println!("Max abs error: {:.6e}", err);
+
+    let diff = rho.view() - rho_ref_reduce.view();
+    let err = diff.view().abs().max();
+    println!("Max abs error: {:.6e}", err);
+}
+
+#[test]
+pub fn test_aodmao2rho_all_dense() {
+    let nao: usize = 2228;
+    let ngrid: usize = 131072;
+    let nset: usize = 1;
+
+    let ao_lhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).sin()).collect();
+    let ao_rhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).cos()).collect();
+    let dm: Vec<f64> = (0..nset * nao * nao).map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
+
+    // special treatment for zeroing
+    // non0tab: (k, n / BLKSIZE)
+    const BLKSIZE: usize = 48;
+    let nblk = ngrid.div_ceil(BLKSIZE);
+    let non0tab: Vec<bool> = (0..nao * nblk).into_par_iter().map(|_| true).collect();
+    // set zero elements in B
+    (0..nao * nblk).into_par_iter().for_each(|idx| {
+        let ao_lhs = unsafe { cast_mut_slice(&ao_lhs) };
+        let ao_rhs = unsafe { cast_mut_slice(&ao_rhs) };
+        let p = idx / nblk;
+        let blk = idx % nblk;
+        if !non0tab[idx] {
+            let j0 = blk * BLKSIZE;
+            let j1 = ((blk + 1) * BLKSIZE).min(ngrid);
+            for j in j0..j1 {
+                ao_lhs[p * ngrid + j] = 0.0;
+                ao_rhs[p * ngrid + j] = 0.0;
+            }
+        }
+    });
+
+    let time = std::time::Instant::now();
+    let mut rho = vec![0.0f64; nset * ngrid];
+    aodmao2rho_anyway(&mut rho, &dm, &ao_lhs, &ao_rhs, [nao, ngrid], [nao, ngrid], nset, &non0tab, nblk);
+    let elapsed = time.elapsed();
+    println!("Elapsed time (aodm2rho): {:.3?}", elapsed);
+
+    use rstsr::prelude::*;
+    let device = DeviceOpenBLAS::default();
+    let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
+    let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
+    let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
+
+    let time = std::time::Instant::now();
+    let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
+    println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
+
+    let time = std::time::Instant::now();
+    let tmp_mul = &ao_lhs_tsr * &dm_dot_ao; // (nset, nao, ngrid)
+    println!("Elapsed time (ao_lhs * dm_dot_ao): {:.3?}", time.elapsed());
+
+    let time = std::time::Instant::now();
+    let rho_ref_reduce = tmp_mul.sum_axes(-2); // (nset, ngrid)
+    println!("Elapsed time (rho from rstsr reduce): {:.3?}", time.elapsed());
+
+    let time = std::time::Instant::now();
+    let rho_ref = vec![0.0f64; nset * ngrid];
+    (0..ngrid).into_par_iter().chunks(1024).for_each(|chunk| {
+        let rho_ref = unsafe { cast_mut_slice(&rho_ref) };
+        for iset in 0..nset {
+            for u in 0..nao {
+                for &j in chunk.iter() {
+                    rho_ref[iset * ngrid + j] += ao_lhs[u * ngrid + j] * dm_dot_ao.raw()[iset * nao * ngrid + u * ngrid + j];
+                }
+            }
+        }
+    });
+    println!("Elapsed time (rho from reduce reference): {:.3?}", time.elapsed());
+
+    let rho = rt::asarray((&rho, [nset, ngrid], &device));
+    let rho_ref = rt::asarray((&rho_ref, [nset, ngrid], &device));
+    let diff = rho.view() - rho_ref.view();
+    let err = diff.view().abs().max();
+    println!("Max abs error: {:.6e}", err);
+
+    let diff = rho.view() - rho_ref_reduce.view();
     let err = diff.view().abs().max();
     println!("Max abs error: {:.6e}", err);
 }

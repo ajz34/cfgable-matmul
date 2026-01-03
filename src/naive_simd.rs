@@ -20,6 +20,7 @@ use num::traits::{MulAdd, Num};
 /// To fully utilize SIMD capabilities, you need to compile by `RUSTFLAGS="-C
 /// target-cpu=native"` or similar flags.
 #[derive(Clone, Debug, Copy)]
+#[repr(C)]
 pub struct TySimd<T, const LANE: usize>(pub [T; LANE]);
 
 impl<T, const LANE: usize> Index<usize> for TySimd<T, LANE> {
