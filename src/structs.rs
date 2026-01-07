@@ -45,7 +45,9 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
                 let a_ip = TySimd::splat(a[p][i]);
                 for j_lane in 0..NR_LANE {
                     let b_pj = b[p][j_lane];
-                    c[i][j_lane].fma_from(a_ip, b_pj);
+                    // c[i][j_lane].fma_from(a_ip, b_pj);
+                    // c[i][j_lane] = a_ip * b_pj + c[i][j_lane];
+                    c[i][j_lane] += a_ip * b_pj;
                 }
                 core::hint::black_box(());
             }

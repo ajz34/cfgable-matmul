@@ -33,6 +33,7 @@ MatmulLoops::<
 
 It should work on other CPUs with SIMD support (AVX2, AVX-512, ARM Neon), but
 - must use `RUSTFLAGS="-C target-cpu=native"` or similar flags `RUSTFLAGS="-C target-feature=+avx2"` to explicitly enable LLVM auto-vectorization (`--release` or `opt-level=3` is not enough);
+- strongly additionally recommend use `RUSTFLAGS="-C llvm-args=-fp-contract=fast"` to enable fused-multiply-add (FMA) optimization. Current microkernel implementation use `c += a * b` pattern which can be optimized to FMA by LLVM with zmm registers; with only xmm registers, this microkernel is not that efficient, but still better than using `f64::mul_add` **if architecture does not support FMA of f64 and requires something like `libm`**.
 - the configurable parameters may need to be adjusted for better performance (SIMD lane fit, size of L1/2/3 cache).
 
 This serves as a reference implementation for fast matmulplication, without explicit use of intrinsics/assembly or nightly rust. The implementation code [impl_matmul.rs](src/impl_matmul.rs) only have about 250 lines of code.

@@ -86,7 +86,7 @@ where
                         let j_lane = j / LANE;
                         let j_offset = j % LANE;
                         let idx_rho = iset * stride_grid + j;
-                        rho[idx_rho] = rho_reg[j_lane][j_offset].clone();
+                        rho[idx_rho] += rho_reg[j_lane][j_offset].clone();
                     }
                 }
                 drop(lock);
@@ -143,16 +143,16 @@ where
                 };
             }
             // iterate the grid points
-            for (task_g, g) in (g..g + gblk).step_by(NR).enumerate() {
-                let gr = if g + NR <= g + gblk { NR } else { g + gblk - g };
+            for (task_g, gg) in (g..g + gblk).step_by(NR).enumerate() {
+                let gr = if gg + NR <= g + gblk { NR } else { g + gblk - gg };
                 // pack rhs
-                Self::pack_b_no_trans_non0tab(&mut ao_rhs_packed, &ao_rhs[g..], vc, gr, stride_grid, &indices_v[..count_v]);
+                Self::pack_b_no_trans_non0tab(&mut ao_rhs_packed, &ao_rhs[gg..], vc, gr, stride_grid, &indices_v[..count_v]);
                 // pack lhs
-                Self::pack_b_no_trans_non0tab(&mut ao_lhs_packed, &ao_lhs[g..], uc, gr, stride_grid, &indices_u[..count_u]);
+                Self::pack_b_no_trans_non0tab(&mut ao_lhs_packed, &ao_lhs[gg..], uc, gr, stride_grid, &indices_u[..count_u]);
                 // compute
                 unsafe {
                     Self::aodmao2rho_loop_1st(
-                        &mut rhos[g..],
+                        &mut rhos[gg..],
                         dm_packed_buffer,
                         &ao_lhs_packed,
                         &ao_rhs_packed,
@@ -266,14 +266,14 @@ pub fn aodmao2rho_anyway(
 }
 
 #[test]
-pub fn test_aodmao2rho() {
+pub fn test_aodmao2rho_1() {
     let nao: usize = 2228;
-    let ngrid: usize = 131072;
+    let ngrid: usize = 131073;
     let nset: usize = 1;
 
-    let ao_lhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).sin()).collect();
-    let ao_rhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).cos()).collect();
-    let dm: Vec<f64> = (0..nset * nao * nao).map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
+    let ao_lhs: Vec<f64> = (0..nao * ngrid).into_par_iter().map(|x| (x as f64).sin()).collect();
+    let ao_rhs: Vec<f64> = (0..nao * ngrid).into_par_iter().map(|x| (x as f64).cos()).collect();
+    let dm: Vec<f64> = (0..nset * nao * nao).into_par_iter().map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
 
     // special treatment for zeroing
     // non0tab: (k, n / BLKSIZE)
@@ -352,12 +352,12 @@ pub fn test_aodmao2rho() {
 #[test]
 pub fn test_aodmao2rho_all_dense() {
     let nao: usize = 2228;
-    let ngrid: usize = 131072;
+    let ngrid: usize = 131073;
     let nset: usize = 1;
 
-    let ao_lhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).sin()).collect();
-    let ao_rhs: Vec<f64> = (0..nao * ngrid).map(|x| (x as f64).cos()).collect();
-    let dm: Vec<f64> = (0..nset * nao * nao).map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
+    let ao_lhs: Vec<f64> = (0..nao * ngrid).into_par_iter().map(|x| (x as f64).sin()).collect();
+    let ao_rhs: Vec<f64> = (0..nao * ngrid).into_par_iter().map(|x| (x as f64).cos()).collect();
+    let dm: Vec<f64> = (0..nset * nao * nao).into_par_iter().map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
 
     // special treatment for zeroing
     // non0tab: (k, n / BLKSIZE)
