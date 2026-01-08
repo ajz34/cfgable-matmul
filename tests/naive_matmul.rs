@@ -22,7 +22,8 @@
 //! | serial IPJ              |  19.61 sec |
 //! | parallel IJ, serial IPJ | ~ 6    sec |
 //! | cfgable_matmul          | 168   msec |
-//! | OpenBLAS                | 358   msec |
+//! | (exceed registers)      | 358   msec |
+//! | OpenBLAS                | 133   msec |
 //! | Faer                    | 152   msec |
 
 use rayon::prelude::*;
