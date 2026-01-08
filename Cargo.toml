@@ -10,6 +10,7 @@ num = "0.4"
 
 [dev-dependencies]
 faer = "0.22"
+rstest = "0.26"
 rstsr = { version = "0.6", features = ["openblas"] }
 rstsr-openblas = { version = "0.6", features = ["openmp"] }
 

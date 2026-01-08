@@ -5,14 +5,28 @@
 //!
 //! | Scheme | Time |
 //! |--------|-----:|
-//! | serial IJP              | 30.74 sec |
-//! | serial IPJ              |  4.00 sec |
-//! | parallel IJ, serial IPJ |  1.65 sec |
-//! | cfgable_matmul          | 40   msec |
-//! | OpenBLAS                | 31   msec |
-//! | Faer                    | 46   msec |
+//! | serial IJP              |  34.95 sec |
+//! | serial IPJ              |   4.00 sec |
+//! | parallel IJ, serial IPJ |   1.50 sec |
+//! | cfgable_matmul          |  40   msec |
+//! | (exceed registers)      |  78   msec |
+//! | OpenBLAS                |  31   msec |
+//! | Faer                    |  46   msec |
+//!
+//! Following example is 4000x4000 multiplied by 4000x4000 matrix multiplication
+//! benchmark on Ryzen 7945HX (Zen4).
+//!
+//! | Scheme | Time |
+//! |--------|-----:|
+//! | serial IJP              | 173.19 sec |
+//! | serial IPJ              |  19.61 sec |
+//! | parallel IJ, serial IPJ | ~ 6    sec |
+//! | cfgable_matmul          | 168   msec |
+//! | OpenBLAS                | 358   msec |
+//! | Faer                    | 152   msec |
 
 use rayon::prelude::*;
+use rstest::rstest;
 
 #[inline]
 #[allow(clippy::mut_from_ref)]
@@ -28,11 +42,10 @@ fn prepare_matrices(m: usize, n: usize, k: usize) -> (Vec<f64>, Vec<f64>) {
     (a, b)
 }
 
-#[test]
-fn test_naive_matmul_ipj() {
-    let m = 800;
-    let n = 4000;
-    let k = 4000;
+#[rstest]
+#[case(800, 4000, 4000)]
+#[case(4000, 4000, 4000)]
+fn test_naive_matmul_ipj(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
     let (a, b) = prepare_matrices(m, n, k);
 
     let time = std::time::Instant::now();
@@ -49,11 +62,10 @@ fn test_naive_matmul_ipj() {
     println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
 }
 
-#[test]
-fn test_naive_matmul_ijp() {
-    let m = 800;
-    let n = 4000;
-    let k = 4000;
+#[rstest]
+#[case(800, 4000, 4000)]
+#[case(4000, 4000, 4000)]
+fn test_naive_matmul_ijp(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
     let (a, b) = prepare_matrices(m, n, k);
 
     let time = std::time::Instant::now();
@@ -71,14 +83,13 @@ fn test_naive_matmul_ijp() {
     println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
 }
 
-#[test]
-fn test_matmul_parblk_ij() {
+#[rstest]
+#[case(800, 4000, 4000)]
+#[case(4000, 4000, 4000)]
+fn test_matmul_parblk_ij(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
     const MB: usize = 128;
     const NB: usize = 256;
 
-    let m = 800;
-    let n = 4000;
-    let k = 4000;
     let (a, b) = prepare_matrices(m, n, k);
 
     let time = std::time::Instant::now();
@@ -108,11 +119,10 @@ fn test_matmul_parblk_ij() {
     println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
 }
 
-#[test]
-fn test_cfgable_matmul() {
-    let m = 800;
-    let n = 4000;
-    let k = 4000;
+#[rstest]
+#[case(800, 4000, 4000)]
+#[case(4000, 4000, 4000)]
+fn test_cfgable_matmul(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
     let (a, b) = prepare_matrices(m, n, k);
 
     let time = std::time::Instant::now();
@@ -122,11 +132,23 @@ fn test_cfgable_matmul() {
     println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
 }
 
-#[test]
-fn test_openblas_via_rstsr() {
-    let m = 800;
-    let n = 4000;
-    let k = 4000;
+#[rstest]
+#[case(800, 4000, 4000)]
+#[case(4000, 4000, 4000)]
+fn test_cfgable_matmul_exceed_registers(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
+    let (a, b) = prepare_matrices(m, n, k);
+
+    let time = std::time::Instant::now();
+    use cfgable_matmul::structs::MatmulLoops;
+    let mut c = vec![0.0f64; m * n];
+    MatmulLoops::<f64, 252, 512, 240, 21, 2, 8, 0>::matmul_loop_macro_mb(&mut c, &a, &b, m, n, k, k, n, n, false, false);
+    println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
+}
+
+#[rstest]
+#[case(800, 4000, 4000)]
+#[case(4000, 4000, 4000)]
+fn test_openblas_via_rstsr(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
     let (a, b) = prepare_matrices(m, n, k);
 
     let time = std::time::Instant::now();
@@ -138,11 +160,10 @@ fn test_openblas_via_rstsr() {
     println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
 }
 
-#[test]
-fn test_faer_via_rstsr() {
-    let m = 800;
-    let n = 4000;
-    let k = 4000;
+#[rstest]
+#[case(800, 4000, 4000)]
+#[case(4000, 4000, 4000)]
+fn test_faer_via_rstsr(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
     let (a, b) = prepare_matrices(m, n, k);
 
     let time = std::time::Instant::now();
