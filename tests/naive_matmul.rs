@@ -7,6 +7,7 @@
 //! |--------|-----:|
 //! | serial IJP              |  34.95 sec |
 //! | serial IPJ              |   4.00 sec |
+//! | block    IJ, serial IPJ |   2.89 sec |
 //! | parallel IJ, serial IPJ |   1.50 sec |
 //! | cfgable_matmul          |  40   msec |
 //! | (exceed registers)      |  78   msec |
@@ -20,6 +21,7 @@
 //! |--------|-----:|
 //! | serial IJP              | 173.19 sec |
 //! | serial IPJ              |  19.61 sec |
+//! | block    IJ, serial IPJ |  14.48 sec |
 //! | parallel IJ, serial IPJ | ~ 6    sec |
 //! | cfgable_matmul          | 168   msec |
 //! | (exceed registers)      | 358   msec |
@@ -117,6 +119,37 @@ fn test_matmul_parblk_ij(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
             }
         }
     });
+    println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
+}
+
+#[rstest]
+#[case(800, 4000, 4000)]
+#[case(4000, 4000, 4000)]
+fn test_matmul_serblk_ij(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
+    const MB: usize = 128;
+    const NB: usize = 256;
+
+    let (a, b) = prepare_matrices(m, n, k);
+
+    let time = std::time::Instant::now();
+    let mut c = vec![0.0f64; m * n];
+
+    for i_start in (0..m).step_by(MB) {
+        for j_start in (0..n).step_by(NB) {
+            let i_end = (i_start + MB).min(m);
+            let j_end = (j_start + NB).min(n);
+
+            for i in i_start..i_end {
+                for p in 0..k {
+                    let a_ip = a[i * k + p];
+                    for j in j_start..j_end {
+                        let b_pj = b[p * n + j];
+                        c[i * n + j] += a_ip * b_pj;
+                    }
+                }
+            }
+        }
+    }
     println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
 }
 
