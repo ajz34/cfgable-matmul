@@ -6,6 +6,8 @@ pub(crate) use core::ops::*;
 pub(crate) use num::traits::MulAdd;
 pub(crate) use rayon::prelude::*;
 pub(crate) use std::sync::Mutex;
+pub(crate) use std::sync::atomic::AtomicUsize;
+pub(crate) use std::sync::atomic::Ordering::SeqCst;
 
 #[allow(unused_imports)]
 pub(crate) use crate::impl_matmul_non0tab::MatmulMicroKernelMaskKForBAPI;

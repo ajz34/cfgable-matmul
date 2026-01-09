@@ -197,14 +197,9 @@ where
         let dm_packed_buffer: Vec<Vec<Vec<[[T; MR]; KC]>>> =
             (0..nthreads).map(|_| (0..nset).map(|_| unsafe { uninitialized_vec(ntask_ur) }).collect()).collect();
 
-        let task_count = Mutex::new(0);
+        let task_count = AtomicUsize::new(0);
         (0..ntask_uc * ntask_vc * ntask_gc).into_par_iter().for_each(|_| {
-            let task_id = {
-                let mut count = task_count.lock().unwrap();
-                let id = *count;
-                *count += 1;
-                id
-            };
+            let task_id = task_count.fetch_add(1, SeqCst);
             let idx_thread = rayon::current_thread_index().unwrap_or(0);
 
             let task_u = task_id % ntask_uc;

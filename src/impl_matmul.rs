@@ -205,14 +205,9 @@ where
         });
 
         // schedule tasks exactly by deterministic order [m n k]
-        let task_count = Mutex::new(0);
+        let task_count = AtomicUsize::new(0);
         (0..ntask_mc * ntask_nc * ntask_kc).into_par_iter().for_each(|_| {
-            let task_id = {
-                let mut count = task_count.lock().unwrap();
-                let id = *count;
-                *count += 1;
-                id
-            };
+            let task_id = task_count.fetch_add(1, SeqCst);
 
             let task_m = task_id % ntask_mc;
             let task_n = (task_id / ntask_mc) % ntask_nc;
