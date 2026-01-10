@@ -12,21 +12,12 @@ where
     );
 }
 
-pub struct MatmulLoops<
-    T,
-    const MC: usize,
-    const KC: usize,
-    const NC: usize,
-    const MR: usize,
-    const NR_LANE: usize,
-    const LANE: usize,
-    const MB: usize = 0,
-> {
+pub struct MatmulLoops<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize> {
     _phantom: core::marker::PhantomData<T>,
 }
 
-impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
-    MatmulMicroKernelAPI<f64, KC, MR, NR_LANE, LANE> for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, LANE, MB>
+impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize>
+    MatmulMicroKernelAPI<f64, KC, MR, NR_LANE, LANE> for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, LANE>
 {
     #[inline(always)]
     unsafe fn microkernel(

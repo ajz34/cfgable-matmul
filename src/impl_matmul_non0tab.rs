@@ -14,8 +14,8 @@ where
     );
 }
 
-impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
-    MatmulMicroKernelMaskKForBAPI<f64, KC, MR, NR_LANE, LANE> for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, LANE, MB>
+impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize>
+    MatmulMicroKernelMaskKForBAPI<f64, KC, MR, NR_LANE, LANE> for MatmulLoops<f64, MC, KC, NC, MR, NR_LANE, LANE>
 {
     #[inline(always)]
     unsafe fn microkernel_mask_k_for_b(
@@ -43,8 +43,8 @@ impl<const MC: usize, const KC: usize, const NC: usize, const MR: usize, const N
 
 /* #endregion microkernel-traits */
 
-impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
-    MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE, MB>
+impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize>
+    MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE>
 where
     T: Mul<Output = T> + AddAssign<T> + Clone,
     Self: MatmulMicroKernelMaskKForBAPI<T, KC, MR, NR_LANE, LANE>,
@@ -303,35 +303,6 @@ where
             );
         });
     }
-
-    pub fn matmul_loop_macro_mb_non0tab<const BLKSIZE: usize>(
-        c: &mut [T],
-        a: &[T],
-        b: &[T],
-        m: usize,
-        n: usize,
-        k: usize,
-        lda: usize,
-        ldb: usize,
-        ldc: usize,
-        transa: bool,
-        transb: bool,
-        tab: &[bool],
-        ldtab: usize,
-    ) where
-        T: Send + Sync,
-    {
-        let mb_size = if MB == 0 { m } else { MB };
-        for i in (0..m).step_by(mb_size) {
-            let mb = if i + mb_size <= m { mb_size } else { m - i };
-            let a_slc = match transa {
-                true => &a[i..],
-                false => &a[i * lda..],
-            };
-            let c_slc = &mut c[i * ldc..];
-            Self::matmul_loop_parallel_mnk_pack_a_non0tab::<BLKSIZE>(c_slc, a_slc, b, mb, n, k, lda, ldb, ldc, transa, transb, tab, ldtab);
-        }
-    }
 }
 
 pub fn matmul_anyway_full_non0tab(
@@ -349,7 +320,7 @@ pub fn matmul_anyway_full_non0tab(
     tab: &[bool],
     ldtab: usize,
 ) {
-    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8, 2360>::matmul_loop_macro_mb_non0tab::<48>(
+    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8>::matmul_loop_parallel_mnk_pack_a_non0tab::<48>(
         c, a, b, m, n, k, lda, ldb, ldc, transa, transb, tab, ldtab,
     );
 }

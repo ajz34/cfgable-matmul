@@ -1,7 +1,7 @@
 use crate::prelude::*;
 
-impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
-    MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE, MB>
+impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize>
+    MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE>
 where
     T: Mul<Output = T> + AddAssign<T> + Clone,
     Self: MatmulMicroKernelAPI<T, KC, MR, NR_LANE, LANE>,
@@ -229,33 +229,6 @@ where
             Self::matmul_loop_2nd_nr_pack_b(c_mc_nc, a_pack_mc_kc, b, mc, nc, kc, ldb, ldc, transb, barrier);
         });
     }
-
-    pub fn matmul_loop_macro_mb(
-        c: &mut [T],
-        a: &[T],
-        b: &[T],
-        m: usize,
-        n: usize,
-        k: usize,
-        lda: usize,
-        ldb: usize,
-        ldc: usize,
-        transa: bool,
-        transb: bool,
-    ) where
-        T: Send + Sync,
-    {
-        let mb_size = if MB == 0 { m } else { MB };
-        for i in (0..m).step_by(mb_size) {
-            let mb = if i + mb_size <= m { mb_size } else { m - i };
-            let a_slc = match transa {
-                true => &a[i..],
-                false => &a[i * lda..],
-            };
-            let c_slc = &mut c[i * ldc..];
-            Self::matmul_loop_parallel_mnk_pack_a(c_slc, a_slc, b, mb, n, k, lda, ldb, ldc, transa, transb);
-        }
-    }
 }
 
 pub fn matmul_anyway_full(
@@ -271,7 +244,7 @@ pub fn matmul_anyway_full(
     transa: bool,
     transb: bool,
 ) {
-    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8, 2360>::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc, transa, transb);
+    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8>::matmul_loop_parallel_mnk_pack_a(c, a, b, m, n, k, lda, ldb, ldc, transa, transb);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::prelude::*;
 
-impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize, const MB: usize>
-    MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE, MB>
+impl<T, const MC: usize, const KC: usize, const NC: usize, const MR: usize, const NR_LANE: usize, const LANE: usize>
+    MatmulLoops<T, MC, KC, NC, MR, NR_LANE, LANE>
 where
     T: Mul<Output = T> + AddAssign<T> + Add<Output = T> + MulAdd<T, Output = T> + Clone,
     Self: MatmulMicroKernelAPI<T, KC, MR, NR_LANE, LANE>,

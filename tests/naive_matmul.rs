@@ -162,7 +162,7 @@ fn test_cfgable_matmul(#[case] m: usize, #[case] n: usize, #[case] k: usize) {
     let time = std::time::Instant::now();
     use cfgable_matmul::structs::MatmulLoops;
     let mut c = vec![0.0f64; m * n];
-    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8, 0>::matmul_loop_macro_mb(&mut c, &a, &b, m, n, k, k, n, n, false, false);
+    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8>::matmul_loop_parallel_mnk_pack_a(&mut c, &a, &b, m, n, k, k, n, n, false, false);
     println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
 }
 
@@ -175,7 +175,7 @@ fn test_cfgable_matmul_exceed_registers(#[case] m: usize, #[case] n: usize, #[ca
     let time = std::time::Instant::now();
     use cfgable_matmul::structs::MatmulLoops;
     let mut c = vec![0.0f64; m * n];
-    MatmulLoops::<f64, 252, 512, 240, 21, 2, 8, 0>::matmul_loop_macro_mb(&mut c, &a, &b, m, n, k, k, n, n, false, false);
+    MatmulLoops::<f64, 252, 512, 240, 21, 2, 8>::matmul_loop_parallel_mnk_pack_a(&mut c, &a, &b, m, n, k, k, n, n, false, false);
     println!("{m}x{n} @ {k}x{n}: {:.3?}.", time.elapsed());
 }
 
