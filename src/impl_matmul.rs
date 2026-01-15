@@ -23,56 +23,26 @@ where
         core::hint::assert_unchecked(kc <= KC);
 
         let NR = NR_LANE * LANE;
+        let mut c_mr_nc: [[T; NC]; MR] = unsafe { core::mem::zeroed() };
 
         for (task_j, j) in (0..nc).step_by(NR).enumerate() {
-            let lock = barrier[task_j].lock().unwrap();
-            let nr = if j + NR <= nc { NR } else { nc - j };
-            core::hint::assert_unchecked(nr <= NR);
-
-            if nr == NR && mr == MR {
-                // let c_reg = core::hint::black_box({
-                let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
-                // load C memory block to C register block
-                for i in 0..MR {
-                    for j_lane in 0..NR_LANE {
-                        c_reg[i][j_lane] = TySimd::loadu_ptr(c.as_ptr().add(i * ldc + j + j_lane * LANE));
-                    }
-                }
-                Self::microkernel(&mut c_reg, a, &b[task_j], kc);
-                //     c_reg
-                // });
-                // store C register block to C memory block
-                for i in 0..MR {
-                    for j_lane in 0..NR_LANE {
-                        c_reg[i][j_lane].storeu_ptr(c.as_mut_ptr().add(i * ldc + j + j_lane * LANE));
-                    }
-                }
-            } else {
-                // avoid out-of-bound access
-                let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
-                // load C memory block to C register block
-                for i in 0..mr {
-                    let c_mem = &c[i * ldc + j..i * ldc + j + nr];
-                    for jj in 0..nr {
-                        let j_lane = jj / LANE;
-                        let j_offset = jj % LANE;
-                        c_reg[i][j_lane][j_offset] = c_mem[jj].clone();
-                    }
-                }
-                // call micro-kernel
-                Self::microkernel(&mut c_reg, a, &b[task_j], kc);
-                // store C register block to C memory block
-                for i in 0..mr {
-                    let c_mem = &mut c[i * ldc + j..i * ldc + j + nr];
-                    for jj in 0..nr {
-                        let j_lane = jj / LANE;
-                        let j_offset = jj % LANE;
-                        c_mem[jj] = c_reg[i][j_lane][j_offset].clone();
-                    }
+            let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
+            Self::microkernel(&mut c_reg, a, &b[task_j], kc);
+            // write back to c_mr_nc
+            for i in 0..MR {
+                for j_lane in 0..NR_LANE {
+                    c_reg[i][j_lane].storeu_ptr(c_mr_nc[i].as_mut_ptr().add(j + j_lane * LANE));
                 }
             }
-            drop(lock);
         }
+        // write back to c with barrier
+        let lock = barrier[0].lock().unwrap();
+        for i in 0..mr {
+            for j in 0..nc {
+                c[i * ldc + j] += c_mr_nc[i][j].clone();
+            }
+        }
+        drop(lock);
     }
 
     #[inline]
