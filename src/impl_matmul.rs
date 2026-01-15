@@ -8,64 +8,66 @@ where
 {
     #[inline]
     pub unsafe fn matmul_loop_1st_mr(
-        c: &mut [T],                      // MC x NR (ldc), DRAM
-        a: &[[[T; MR]; KC]],              // KC x MC (lda), packed-transposed, cache l2
-        b: &[[TySimd<T, LANE>; NR_LANE]], // KC x NR, packed, aligned, cache l1
-        mc: usize,                        // mc, for write to C
-        nr: usize,                        // nr, for write to C
-        kc: usize,                        // kc, to avoid non-necessary / uninitialized access
-        ldc: usize,                       // ldc, for write to C
-        barrier: &[Mutex<()>],            // barrier for writing to C
+        c: &mut [T],                            // MR x NC (ldc), DRAM
+        a: &[[T; MR]; KC],                      // KR x MC (lda), packed-transposed, cache l2
+        b: &[[[TySimd<T, LANE>; NR_LANE]; KC]], // KC x NC, packed, aligned, cache l1
+        mr: usize,                              // mr, for write to C
+        nc: usize,                              // nc, for write to C
+        kc: usize,                              // kc, to avoid non-necessary / uninitialized access
+        ldc: usize,                             // ldc, for write to C
+        barrier: &[Mutex<()>],                  // barrier for writing to C
     ) {
-        // MR -> MC
-        core::hint::assert_unchecked(mc <= MC);
-        core::hint::assert_unchecked(nr <= NR_LANE * LANE);
+        // NR -> NC
+        core::hint::assert_unchecked(mr <= MR);
+        core::hint::assert_unchecked(nc <= NC);
         core::hint::assert_unchecked(kc <= KC);
 
-        for (task_i, i) in (0..mc).step_by(MR).enumerate() {
-            let lock = barrier[task_i].lock().unwrap();
-            let mr = if i + MR <= mc { MR } else { mc - i };
-            core::hint::assert_unchecked(mr <= MR);
+        let NR = NR_LANE * LANE;
 
-            if nr == NR_LANE * LANE && mr == MR {
+        for (task_j, j) in (0..nc).step_by(NR).enumerate() {
+            let lock = barrier[task_j].lock().unwrap();
+            let nr = if j + NR <= nc { NR } else { nc - j };
+            core::hint::assert_unchecked(nr <= NR);
+
+            if nr == NR && mr == MR {
+                // let c_reg = core::hint::black_box({
                 let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
                 // load C memory block to C register block
-                for ii in 0..MR {
-                    let c_ptr = &c.as_ptr().add((i + ii) * ldc);
+                for i in 0..MR {
                     for j_lane in 0..NR_LANE {
-                        c_reg[ii][j_lane] = TySimd::loadu_ptr(c_ptr.add(j_lane * LANE));
+                        c_reg[i][j_lane] = TySimd::loadu_ptr(c.as_ptr().add(i * ldc + j + j_lane * LANE));
                     }
                 }
-                // call micro-kernel
-                Self::microkernel(&mut c_reg, &a[task_i], b, kc);
+                Self::microkernel(&mut c_reg, a, &b[task_j], kc);
+                //     c_reg
+                // });
                 // store C register block to C memory block
-                for ii in 0..MR {
-                    let c_ptr = &mut c.as_mut_ptr().add((i + ii) * ldc);
+                for i in 0..MR {
                     for j_lane in 0..NR_LANE {
-                        c_reg[ii][j_lane].storeu_ptr(c_ptr.add(j_lane * LANE));
+                        c_reg[i][j_lane].storeu_ptr(c.as_mut_ptr().add(i * ldc + j + j_lane * LANE));
                     }
                 }
             } else {
                 // avoid out-of-bound access
                 let mut c_reg: [[TySimd<T, LANE>; NR_LANE]; MR] = unsafe { zeroed() };
                 // load C memory block to C register block
-                for ii in 0..mr {
-                    let c_mem = &c[(i + ii) * ldc..(i + ii) * ldc + nr];
+                for i in 0..mr {
+                    let c_mem = &c[i * ldc + j..i * ldc + j + nr];
                     for jj in 0..nr {
                         let j_lane = jj / LANE;
                         let j_offset = jj % LANE;
-                        c_reg[ii][j_lane][j_offset] = c_mem[jj].clone();
+                        c_reg[i][j_lane][j_offset] = c_mem[jj].clone();
                     }
                 }
                 // call micro-kernel
-                Self::microkernel(&mut c_reg, &a[task_i], b, kc);
+                Self::microkernel(&mut c_reg, a, &b[task_j], kc);
                 // store C register block to C memory block
-                for ii in 0..mr {
-                    let c_mem = &mut c[(i + ii) * ldc..(i + ii) * ldc + nr];
+                for i in 0..mr {
+                    let c_mem = &mut c[i * ldc + j..i * ldc + j + nr];
                     for jj in 0..nr {
                         let j_lane = jj / LANE;
                         let j_offset = jj % LANE;
-                        c_mem[jj] = c_reg[ii][j_lane][j_offset].clone();
+                        c_mem[jj] = c_reg[i][j_lane][j_offset].clone();
                     }
                 }
             }
@@ -134,21 +136,31 @@ where
             core::hint::assert_unchecked(mc <= MC);
             core::hint::assert_unchecked(nc <= NC);
             core::hint::assert_unchecked(kc <= KC);
+            core::hint::assert_unchecked(NC % (NR_LANE * LANE) == 0);
         }
 
         let NR = NR_LANE * LANE;
-        let ntask_mr = MC.div_ceil(MR);
-        let mut buf_b: [[TySimd<T, LANE>; NR_LANE]; KC] = unsafe { zeroed() }; // KC x NR, packed, aligned, cache l1
-        let mut buf_trans_b: [[[T; LANE]; NR_LANE]; KC] = unsafe { zeroed() }; // KC x NR, temporary buffer for transpose
+        let ntask_nr = NC.div_ceil(NR);
+        let mut buf_b: [[T; KC]; NC] = unsafe { zeroed() }; // KC x NC, packed, aligned, cache l1
+        let mut buf_trans_b: [[[T; LANE]; NR_LANE]; KC] = unsafe { zeroed() }; // KC x NC, temporary buffer for transpose
         let buf_trans_b = unsafe { core::slice::from_raw_parts_mut(buf_trans_b.as_mut_ptr() as *mut T, KC * NR_LANE * LANE) };
 
-        for (task_j, j) in (0..nc).step_by(NR).enumerate() {
+        // perform packing B
+        for j in (0..nc).step_by(NR) {
             let nr = if j + NR <= nc { NR } else { nc - j };
+            let buf_b_task = &mut buf_b[j..j + NR];
+            // need to trasmute buf_b_task to [[TySimd<T, LANE>; NR_LANE]; KC]
+            let buf_b_task = unsafe { core::slice::from_raw_parts_mut(buf_b_task.as_mut_ptr() as *mut [TySimd<T, LANE>; NR_LANE], KC) };
             match transb {
-                true => Self::pack_b_trans(&mut buf_b, &b[j * ldb..], kc, nr, ldb, buf_trans_b),
-                false => Self::pack_b_no_trans(&mut buf_b, &b[j..], kc, nr, ldb),
+                true => Self::pack_b_trans(buf_b_task, &b[j * ldb..], kc, nr, ldb, buf_trans_b),
+                false => Self::pack_b_no_trans(buf_b_task, &b[j..], kc, nr, ldb),
             }
-            unsafe { Self::matmul_loop_1st_mr(&mut c[j..], a, &buf_b, mc, nr, kc, ldc, &barrier[task_j * ntask_mr..]) };
+        }
+        // need to transmute buf_b to [[[TySimd<T, LANE>; NR_LANE]; KC]]
+        let buf_b = unsafe { core::slice::from_raw_parts(buf_b.as_ptr() as *const [[TySimd<T, LANE>; NR_LANE]; KC], ntask_nr) };
+        for (task_i, i) in (0..mc).step_by(MR).enumerate() {
+            let mr = if i + MR <= mc { MR } else { mc - i };
+            unsafe { Self::matmul_loop_1st_mr(&mut c[i * ldc..], &a[task_i], buf_b, mr, nc, kc, ldc, &barrier[task_i * ntask_nr..]) };
         }
     }
 

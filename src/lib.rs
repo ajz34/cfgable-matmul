@@ -3,6 +3,7 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_many_arguments)]
+#![allow(clippy::manual_is_multiple_of)]
 #![doc = include_str!("principle-loops.md")]
 
 pub mod impl_aodmao2rho;
