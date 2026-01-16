@@ -19,10 +19,11 @@ where
 
         for (idx_p, &p) in indices_k_for_b.iter().enumerate() {
             for (task_m, indices_mr) in indices_m_for_a.chunks(MR).enumerate() {
+                core::hint::assert_unchecked(task_m < dm_packed.len());
                 for (idx_m, m) in indices_mr.iter().enumerate() {
                     let idx_ao = m * stride_ao + p;
-                    core::hint::assert_unchecked(task_m < dm_packed.len());
-                    dm_packed[task_m][idx_p][idx_m] = (*dm.get_unchecked(idx_ao)).clone();
+                    core::hint::assert_unchecked(idx_ao < dm.len());
+                    dm_packed[task_m][idx_p][idx_m] = dm[idx_ao].clone();
                 }
             }
         }
@@ -255,93 +256,106 @@ pub fn aodmao2rho_anyway(
     tab: &[bool],
     ldtab: usize,
 ) {
-    MatmulLoops::<f64, 252, 512, 240, 14, 2, 8>::aodmao2rho_loop_parallel::<48>(
+    // DFT grids contraction will have very long dimension (ngrid) at N direction.
+    // Packing can be costly, NC parallel can be perfect, so MC should be set to
+    // larger value.
+    // However, if `nset` (of density matrices) is also large, MC cannot be too
+    // large that explodes the L3 cache too much.
+    MatmulLoops::<f64, 560, 512, 240, 14, 2, 8>::aodmao2rho_loop_parallel::<48>(
         rhos, dms, ao_lhs, ao_rhs, strides, shape, nset, tab, ldtab,
     );
 }
 
-#[test]
-pub fn test_aodmao2rho_1() {
-    let nao: usize = 2228;
-    let ngrid: usize = 131073;
-    let nset: usize = 1;
+#[cfg(test)]
+mod test_in_aodmao2rho {
+    use super::*;
+    use rstest::rstest;
 
-    let ao_lhs: Vec<f64> = (0..nao * ngrid).into_par_iter().map(|x| (x as f64).sin()).collect();
-    let ao_rhs: Vec<f64> = (0..nao * ngrid).into_par_iter().map(|x| (x as f64).cos()).collect();
-    let dm: Vec<f64> = (0..nset * nao * nao).into_par_iter().map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
+    #[rstest]
+    #[case(1, 131072)]
+    #[case(3, 131072)]
+    #[case(3, 16384)]
+    pub fn test_aodmao2rho_usual(#[case] nset: usize, #[case] ngrid: usize) {
+        let nao: usize = 2228;
 
-    // special treatment for zeroing
-    // non0tab: (k, n / BLKSIZE)
-    const BLKSIZE: usize = 48;
-    let nblk = ngrid.div_ceil(BLKSIZE);
-    let mod_pattern = [
-        true, false, true, false, false, false, false, false, false, false, false, true, true, false, false, false, false, false, true,
-        false,
-    ]; // 25%
-    let non0tab: Vec<bool> = (0..nao * nblk).into_par_iter().map(|i| mod_pattern[i % 20]).collect();
-    // set zero elements in B
-    (0..nao * nblk).into_par_iter().for_each(|idx| {
-        let ao_lhs = unsafe { cast_mut_slice(&ao_lhs) };
-        let ao_rhs = unsafe { cast_mut_slice(&ao_rhs) };
-        let p = idx / nblk;
-        let blk = idx % nblk;
-        if !non0tab[idx] {
-            let j0 = blk * BLKSIZE;
-            let j1 = ((blk + 1) * BLKSIZE).min(ngrid);
-            for j in j0..j1 {
-                ao_lhs[p * ngrid + j] = 0.0;
-                ao_rhs[p * ngrid + j] = 0.0;
-            }
-        }
-    });
+        let ao_lhs: Vec<f64> = (0..nao * ngrid).into_par_iter().map(|x| (x as f64).sin()).collect();
+        let ao_rhs: Vec<f64> = (0..nao * ngrid).into_par_iter().map(|x| (x as f64).cos()).collect();
+        let dm: Vec<f64> = (0..nset * nao * nao).into_par_iter().map(|x| (x as f64 * 0.38 + 1.2).sin()).collect();
 
-    let time = std::time::Instant::now();
-    let mut rho = vec![0.0f64; nset * ngrid];
-    aodmao2rho_anyway(&mut rho, &dm, &ao_lhs, &ao_rhs, [nao, ngrid], [nao, ngrid], nset, &non0tab, nblk);
-    let elapsed = time.elapsed();
-    println!("Elapsed time (aodm2rho): {:.3?}", elapsed);
-
-    use rstsr::prelude::*;
-    let device = DeviceOpenBLAS::default();
-    let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
-    let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
-    let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
-
-    let time = std::time::Instant::now();
-    let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
-    println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
-
-    let time = std::time::Instant::now();
-    let tmp_mul = &ao_lhs_tsr * &dm_dot_ao; // (nset, nao, ngrid)
-    println!("Elapsed time (ao_lhs * dm_dot_ao): {:.3?}", time.elapsed());
-
-    let time = std::time::Instant::now();
-    let rho_ref_reduce = tmp_mul.sum_axes(-2); // (nset, ngrid)
-    println!("Elapsed time (rho from rstsr reduce): {:.3?}", time.elapsed());
-
-    let time = std::time::Instant::now();
-    let rho_ref = vec![0.0f64; nset * ngrid];
-    (0..ngrid).into_par_iter().chunks(1024).for_each(|chunk| {
-        let rho_ref = unsafe { cast_mut_slice(&rho_ref) };
-        for iset in 0..nset {
-            for u in 0..nao {
-                for &j in chunk.iter() {
-                    rho_ref[iset * ngrid + j] += ao_lhs[u * ngrid + j] * dm_dot_ao.raw()[iset * nao * ngrid + u * ngrid + j];
+        // special treatment for zeroing
+        // non0tab: (k, n / BLKSIZE)
+        const BLKSIZE: usize = 48;
+        let nblk = ngrid.div_ceil(BLKSIZE);
+        let mod_pattern = [
+            true, false, true, false, false, false, false, false, false, false, false, true, true, false, false, false, false, false, true,
+            false,
+        ]; // 25%
+        let non0tab: Vec<bool> = (0..nao * nblk).into_par_iter().map(|i| mod_pattern[i % 20]).collect();
+        // set zero elements in B
+        (0..nao * nblk).into_par_iter().for_each(|idx| {
+            let ao_lhs = unsafe { cast_mut_slice(&ao_lhs) };
+            let ao_rhs = unsafe { cast_mut_slice(&ao_rhs) };
+            let p = idx / nblk;
+            let blk = idx % nblk;
+            if !non0tab[idx] {
+                let j0 = blk * BLKSIZE;
+                let j1 = ((blk + 1) * BLKSIZE).min(ngrid);
+                for j in j0..j1 {
+                    ao_lhs[p * ngrid + j] = 0.0;
+                    ao_rhs[p * ngrid + j] = 0.0;
                 }
             }
-        }
-    });
-    println!("Elapsed time (rho from reduce reference): {:.3?}", time.elapsed());
+        });
 
-    let rho = rt::asarray((&rho, [nset, ngrid], &device));
-    let rho_ref = rt::asarray((&rho_ref, [nset, ngrid], &device));
-    let diff = rho.view() - rho_ref.view();
-    let err = diff.view().abs().max();
-    println!("Max abs error: {:.6e}", err);
+        std::thread::sleep(std::time::Duration::from_micros(300));
+        let time = std::time::Instant::now();
+        let mut rho = vec![0.0f64; nset * ngrid];
+        aodmao2rho_anyway(&mut rho, &dm, &ao_lhs, &ao_rhs, [nao, ngrid], [nao, ngrid], nset, &non0tab, nblk);
+        let elapsed = time.elapsed();
+        println!("Elapsed time (aodm2rho): {:.3?}", elapsed);
 
-    let diff = rho.view() - rho_ref_reduce.view();
-    let err = diff.view().abs().max();
-    println!("Max abs error: {:.6e}", err);
+        use rstsr::prelude::*;
+        let device = DeviceOpenBLAS::default();
+        let ao_lhs_tsr = rt::asarray((&ao_lhs, [nao, ngrid], &device));
+        let ao_rhs_tsr = rt::asarray((&ao_rhs, [nao, ngrid], &device));
+        let dm_tsr = rt::asarray((&dm, [nset, nao, nao], &device));
+
+        let time = std::time::Instant::now();
+        let dm_dot_ao = &dm_tsr % &ao_rhs_tsr; // (nset, nao, ngrid)
+        println!("Elapsed time (dm_dot_ao reference): {:.3?}", time.elapsed());
+
+        let time = std::time::Instant::now();
+        let tmp_mul = &ao_lhs_tsr * &dm_dot_ao; // (nset, nao, ngrid)
+        println!("Elapsed time (ao_lhs * dm_dot_ao): {:.3?}", time.elapsed());
+
+        let time = std::time::Instant::now();
+        let rho_ref_reduce = tmp_mul.sum_axes(-2); // (nset, ngrid)
+        println!("Elapsed time (rho from rstsr reduce): {:.3?}", time.elapsed());
+
+        let time = std::time::Instant::now();
+        let rho_ref = vec![0.0f64; nset * ngrid];
+        (0..ngrid).into_par_iter().chunks(1024).for_each(|chunk| {
+            let rho_ref = unsafe { cast_mut_slice(&rho_ref) };
+            for iset in 0..nset {
+                for u in 0..nao {
+                    for &j in chunk.iter() {
+                        rho_ref[iset * ngrid + j] += ao_lhs[u * ngrid + j] * dm_dot_ao.raw()[iset * nao * ngrid + u * ngrid + j];
+                    }
+                }
+            }
+        });
+        println!("Elapsed time (rho from reduce reference): {:.3?}", time.elapsed());
+
+        let rho = rt::asarray((&rho, [nset, ngrid], &device));
+        let rho_ref = rt::asarray((&rho_ref, [nset, ngrid], &device));
+        let diff = rho.view() - rho_ref.view();
+        let err = diff.view().abs().max();
+        println!("Max abs error: {:.6e}", err);
+
+        let diff = rho.view() - rho_ref_reduce.view();
+        let err = diff.view().abs().max();
+        println!("Max abs error: {:.6e}", err);
+    }
 }
 
 #[test]

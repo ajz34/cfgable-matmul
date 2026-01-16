@@ -130,7 +130,6 @@ where
 
     #[inline]
     pub fn pack_b_no_trans_non0tab(dst: &mut [[TySimd<T, LANE>; NR_LANE]], src: &[T], kc: usize, nr: usize, ldb: usize, indices: &[usize]) {
-        unsafe { core::hint::assert_unchecked(kc <= KC) };
         unsafe { core::hint::assert_unchecked(nr <= NR_LANE * LANE) };
         if indices.is_empty() {
             return;
@@ -138,11 +137,13 @@ where
 
         if nr == NR_LANE * LANE {
             for (idx_p, &p) in indices.iter().enumerate() {
-                unsafe { core::hint::assert_unchecked(idx_p < kc) };
+                unsafe { core::hint::assert_unchecked(idx_p < dst.len()) };
                 unsafe { core::hint::assert_unchecked(p < kc) };
-                let src_ptr = unsafe { src.as_ptr().add(p * ldb) };
                 for j_lane in 0..NR_LANE {
-                    dst[idx_p][j_lane] = unsafe { TySimd::loadu_ptr(src_ptr.add(j_lane * LANE)) };
+                    let idx_src = p * ldb + j_lane * LANE;
+                    unsafe { core::hint::assert_unchecked(idx_src + LANE <= src.len()) };
+                    let reg = unsafe { TySimd::loadu_ptr(&src[idx_src]) };
+                    dst[idx_p][j_lane] = reg;
                 }
             }
         } else {
