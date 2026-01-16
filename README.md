@@ -27,8 +27,7 @@ MatmulLoops::<
     14,   // register block `MR`, `(MR + 1) * NR_LANE` should fit in registers (less than 32)
     2,    // register block `NR_LANE` (= NR / LANE, 2 for Intel and Zen4/5, 1 for Zen1-4)
     8,    // SIMD lane `LANE` (8 x f64 for AVX-512)
-    2360, // L3   cache block `MB`
->::matmul_loop_macro_mb(c, a, b, m, n, k, lda, ldb, ldc, transa, transb);
+>::matmul_loop_parallel_mnk_pack_a(c, a, b, m, n, k, lda, ldb, ldc, transa, transb);
 ```
 
 It should work on other CPUs with SIMD support (AVX2, AVX-512, ARM Neon), but
